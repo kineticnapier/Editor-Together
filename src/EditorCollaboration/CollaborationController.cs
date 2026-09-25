@@ -4,7 +4,7 @@ using ADOFAI;
 using HarmonyLib;
 using UnityModManagerNet;
 
-namespace EditorCollaboration
+namespace EditorTogether
 {
     internal sealed class CollaborationController : IDisposable
     {
@@ -46,53 +46,29 @@ namespace EditorCollaboration
 
         private async System.Threading.Tasks.Task ConnectCoreAsync(string url)
         {
-            try
-            {
-                await transport.ConnectAsync(url).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                logger.Error($"[Collab] connection failed: {ex.Message}");
-                throw;
-            }
+            try { await transport.ConnectAsync(url).ConfigureAwait(false); }
+            catch (Exception ex) { logger.Error($"[Collab] connection failed: {ex.Message}"); throw; }
         }
 
         private void TryFindEditor()
         {
-            if (lastEditor != null)
-                return;
-
-            try
-            {
-                lastEditor = UnityEngine.Object.FindFirstObjectByType<scnEditor>();
-            }
-            catch
-            {
-                lastEditor = UnityEngine.Object.FindObjectOfType<scnEditor>();
-            }
+            if (lastEditor != null) return;
+            try { lastEditor = UnityEngine.Object.FindFirstObjectByType<scnEditor>(); }
+            catch { lastEditor = UnityEngine.Object.FindObjectOfType<scnEditor>(); }
         }
 
         public void OnEditorStateSaved(scnEditor editor)
         {
-            if (editor == null)
-                return;
-
+            if (editor == null) return;
             lastEditor = editor;
-            if (!transport.IsConnected || IsApplyingRemote)
-                return;
-
-            // SaveState runs at the start of many editor operations. Do not Encode here:
-            // just remember that something is changing, then serialize once after the
-            // operation has had time to finish.
+            if (!transport.IsConnected || IsApplyingRemote) return;
             dirty = true;
             dirtyElapsed = 0f;
         }
 
         private void PublishSnapshot(scnEditor editor)
         {
-            if (!transport.IsConnected)
-                return;
-
+            if (!transport.IsConnected) return;
             string encodedLevel = editor.levelData.Encode();
             Revision++;
             logger.Log($"[Collab] snapshot published; revision={Revision}, bytes={encodedLevel.Length}, events={editor.events.Count}, decorations={editor.decorations.Count}");
@@ -101,48 +77,24 @@ namespace EditorCollaboration
 
         private async System.Threading.Tasks.Task SendSnapshotAsync(long revision, string encodedLevel)
         {
-            try
-            {
-                await transport.SendSnapshotAsync(revision, encodedLevel).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                logger.Error($"[Collab] send failed: {ex.Message}");
-            }
+            try { await transport.SendSnapshotAsync(revision, encodedLevel).ConfigureAwait(false); }
+            catch (Exception ex) { logger.Error($"[Collab] send failed: {ex.Message}"); }
         }
 
         public void Update(float deltaTime = 0f)
         {
             TryFindEditor();
-            if (lastEditor == null)
-                return;
-
+            if (lastEditor == null) return;
             SnapshotMessage newest = null;
-            while (transport.TryDequeue(out SnapshotMessage message))
-                newest = message;
-
-            if (newest != null)
-                ApplyRemoteSnapshot(lastEditor, newest);
-
-            if (!dirty || !transport.IsConnected || IsApplyingRemote)
-                return;
-
-            float dt = deltaTime > 0f ? deltaTime : UnityEngine.Time.unscaledDeltaTime;
-            dirtyElapsed += dt;
-            if (dirtyElapsed < DebounceDelay)
-                return;
-
+            while (transport.TryDequeue(out SnapshotMessage message)) newest = message;
+            if (newest != null) ApplyRemoteSnapshot(lastEditor, newest);
+            if (!dirty || !transport.IsConnected || IsApplyingRemote) return;
+            dirtyElapsed += deltaTime > 0f ? deltaTime : UnityEngine.Time.unscaledDeltaTime;
+            if (dirtyElapsed < DebounceDelay) return;
             dirty = false;
             dirtyElapsed = 0f;
-            try
-            {
-                logger.Log("[Collab] editor mutation settled; publishing snapshot");
-                PublishSnapshot(lastEditor);
-            }
-            catch (Exception ex)
-            {
-                logger.Error("[Collab] live snapshot failed: " + ex.Message);
-            }
+            try { logger.Log("[Collab] editor mutation settled; publishing snapshot"); PublishSnapshot(lastEditor); }
+            catch (Exception ex) { logger.Error("[Collab] live snapshot failed: " + ex.Message); }
         }
 
         private void ApplyRemoteSnapshot(scnEditor editor, SnapshotMessage snapshot)
@@ -150,19 +102,14 @@ namespace EditorCollaboration
             ApplyRemote(() =>
             {
                 var dictionary = RuntimeJson.Deserialize(snapshot.LevelData) as Dictionary<string, object>;
-                if (dictionary == null)
-                    throw new InvalidOperationException("Remote LevelData was not a JSON object.");
-
+                if (dictionary == null) throw new InvalidOperationException("Remote LevelData was not a JSON object.");
                 var levelData = new LevelData();
                 levelData.Setup();
                 LoadResult loadResult;
                 levelData.Decode(dictionary, out loadResult);
-
                 editor.customLevel.levelData = levelData;
                 editor.RemakePath(true, true);
                 AccessTools.Method(typeof(scnEditor), "UpdateDecorationObjects")?.Invoke(editor, null);
-
-                // A remote RemakePath must never turn into a local outgoing edit.
                 dirty = false;
                 dirtyElapsed = 0f;
                 Revision = Math.Max(Revision, snapshot.Revision);
@@ -172,27 +119,13 @@ namespace EditorCollaboration
 
         public void ApplyRemote(Action apply)
         {
-            if (apply == null)
-                throw new ArgumentNullException(nameof(apply));
-
+            if (apply == null) throw new ArgumentNullException(nameof(apply));
             IsApplyingRemote = true;
-            try
-            {
-                apply();
-            }
-            catch (Exception ex)
-            {
-                logger.Error($"[Collab] remote apply failed: {ex}");
-            }
-            finally
-            {
-                IsApplyingRemote = false;
-            }
+            try { apply(); }
+            catch (Exception ex) { logger.Error($"[Collab] remote apply failed: {ex}"); }
+            finally { IsApplyingRemote = false; }
         }
 
-        public void Dispose()
-        {
-            transport.Dispose();
-        }
+        public void Dispose() { transport.Dispose(); }
     }
 }

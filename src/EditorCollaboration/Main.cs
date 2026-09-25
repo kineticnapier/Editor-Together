@@ -3,7 +3,7 @@ using HarmonyLib;
 using UnityEngine;
 using UnityModManagerNet;
 
-namespace EditorCollaboration
+namespace EditorTogether
 {
     public static class Main
     {
@@ -30,7 +30,7 @@ namespace EditorCollaboration
             modEntry.OnUpdate = OnUpdate;
             modEntry.OnGUI = OnGUI;
             modEntry.OnUnload = Unload;
-            modEntry.Logger.Log("EditorCollaboration v0.0.2 prototype loaded.");
+            modEntry.Logger.Log("EditorTogether prototype loaded.");
             return true;
         }
 
@@ -41,7 +41,7 @@ namespace EditorCollaboration
 
         private static void OnGUI(UnityModManager.ModEntry modEntry)
         {
-            GUILayout.Label("Editor Collaboration");
+            GUILayout.Label("Editor Together");
             GUILayout.Space(4f);
 
             GUILayout.BeginHorizontal();

@@ -8,135 +8,89 @@ using System.Threading;
 using System.Threading.Tasks;
 using UnityModManagerNet;
 
-namespace EditorCollaboration
+namespace EditorTogether
 {
     internal sealed class WebSocketTransport : IDisposable
     {
         private readonly UnityModManager.ModEntry.ModLogger logger;
-        private readonly ConcurrentQueue<SnapshotMessage> received = new ConcurrentQueue<SnapshotMessage>();
+        private readonly ClientWebSocket socket = new ClientWebSocket();
+        private readonly ConcurrentQueue<SnapshotMessage> incoming = new ConcurrentQueue<SnapshotMessage>();
         private readonly CancellationTokenSource cancellation = new CancellationTokenSource();
-        private readonly string clientId = Guid.NewGuid().ToString("N");
-        private readonly SemaphoreSlim sendLock = new SemaphoreSlim(1, 1);
-        private ClientWebSocket socket;
+        private Task receiveTask;
+        public string ClientId { get; } = Guid.NewGuid().ToString("N");
+        public bool IsConnected => socket.State == WebSocketState.Open;
 
-        public string ClientId => clientId;
-        public bool IsConnected => socket != null && socket.State == WebSocketState.Open;
-
-        public WebSocketTransport(UnityModManager.ModEntry.ModLogger logger)
-        {
-            this.logger = logger;
-        }
+        public WebSocketTransport(UnityModManager.ModEntry.ModLogger logger) { this.logger = logger; }
 
         public async Task ConnectAsync(string url)
         {
-            if (IsConnected)
-                return;
-
-            socket?.Dispose();
-            socket = new ClientWebSocket();
+            if (IsConnected) return;
             await socket.ConnectAsync(new Uri(url), cancellation.Token).ConfigureAwait(false);
-            logger.Log($"[Collab] connected to {url} as {clientId}");
-            _ = ReceiveLoopAsync(socket, cancellation.Token);
+            logger.Log($"[Collab] connected to {url} as {ClientId}");
+            receiveTask = Task.Run(ReceiveLoopAsync);
         }
 
-        public async Task SendSnapshotAsync(long revision, string encodedLevel)
+        public async Task SendSnapshotAsync(long revision, string levelData)
         {
-            ClientWebSocket current = socket;
-            if (current == null || current.State != WebSocketState.Open)
-                return;
-
+            if (!IsConnected) return;
             var envelope = new Dictionary<string, object>
             {
                 ["type"] = "snapshot",
-                ["clientId"] = clientId,
+                ["clientId"] = ClientId,
                 ["revision"] = revision,
-                ["levelData"] = encodedLevel
+                ["levelData"] = levelData
             };
-            byte[] payload = Encoding.UTF8.GetBytes(RuntimeJson.Serialize(envelope));
-
-            await sendLock.WaitAsync(cancellation.Token).ConfigureAwait(false);
-            try
-            {
-                await current.SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Text, true, cancellation.Token).ConfigureAwait(false);
-            }
-            finally
-            {
-                sendLock.Release();
-            }
+            byte[] bytes = Encoding.UTF8.GetBytes(RuntimeJson.Serialize(envelope));
+            await socket.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, cancellation.Token).ConfigureAwait(false);
         }
 
-        public bool TryDequeue(out SnapshotMessage message) => received.TryDequeue(out message);
+        public bool TryDequeue(out SnapshotMessage message) => incoming.TryDequeue(out message);
 
-        private async Task ReceiveLoopAsync(ClientWebSocket current, CancellationToken token)
+        private async Task ReceiveLoopAsync()
         {
             byte[] buffer = new byte[64 * 1024];
             try
             {
-                while (!token.IsCancellationRequested && current.State == WebSocketState.Open)
+                while (!cancellation.IsCancellationRequested && socket.State == WebSocketState.Open)
                 {
                     using (var stream = new MemoryStream())
                     {
                         WebSocketReceiveResult result;
                         do
                         {
-                            result = await current.ReceiveAsync(new ArraySegment<byte>(buffer), token).ConfigureAwait(false);
-                            if (result.MessageType == WebSocketMessageType.Close)
-                            {
-                                await current.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None).ConfigureAwait(false);
-                                return;
-                            }
+                            result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellation.Token).ConfigureAwait(false);
+                            if (result.MessageType == WebSocketMessageType.Close) return;
                             stream.Write(buffer, 0, result.Count);
-                        }
-                        while (!result.EndOfMessage);
-
-                        if (result.MessageType != WebSocketMessageType.Text)
-                            continue;
-
+                        } while (!result.EndOfMessage);
                         string jsonText = Encoding.UTF8.GetString(stream.ToArray());
-                        var obj = RuntimeJson.Deserialize(jsonText) as Dictionary<string, object>;
-                        if (obj == null || !obj.TryGetValue("type", out object type) || !string.Equals(type as string, "snapshot", StringComparison.Ordinal))
-                            continue;
-
-                        string sender = obj.TryGetValue("clientId", out object senderValue) ? senderValue as string : null;
-                        if (string.IsNullOrEmpty(sender) || sender == clientId)
-                            continue;
-                        if (!obj.TryGetValue("revision", out object revisionValue) || !obj.TryGetValue("levelData", out object levelValue))
-                            continue;
-
-                        long revision = Convert.ToInt64(revisionValue);
-                        string levelData = levelValue as string;
-                        if (!string.IsNullOrEmpty(levelData))
-                            received.Enqueue(new SnapshotMessage(sender, revision, levelData));
+                        var json = RuntimeJson.Deserialize(jsonText) as Dictionary<string, object>;
+                        if (json == null || !json.TryGetValue("type", out object typeObj) || Convert.ToString(typeObj) != "snapshot") continue;
+                        string clientId = json.TryGetValue("clientId", out object clientObj) ? Convert.ToString(clientObj) : string.Empty;
+                        if (clientId == ClientId) continue;
+                        long revision = json.TryGetValue("revision", out object revisionObj) ? Convert.ToInt64(revisionObj) : 0;
+                        string levelData = json.TryGetValue("levelData", out object levelObj) ? Convert.ToString(levelObj) : string.Empty;
+                        incoming.Enqueue(new SnapshotMessage(clientId, revision, levelData));
                     }
                 }
             }
             catch (OperationCanceledException) { }
-            catch (Exception ex)
-            {
-                logger.Error($"[Collab] receive loop failed: {ex}");
-            }
+            catch (Exception ex) { logger.Error($"[Collab] receive loop failed: {ex}"); }
         }
 
         public void Dispose()
         {
             cancellation.Cancel();
-            try { socket?.Dispose(); } catch { }
-            sendLock.Dispose();
+            try { if (socket.State == WebSocketState.Open) socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Mod unloaded", CancellationToken.None).Wait(250); } catch { }
+            socket.Dispose();
             cancellation.Dispose();
         }
     }
 
     internal sealed class SnapshotMessage
     {
-        public readonly string ClientId;
-        public readonly long Revision;
-        public readonly string LevelData;
-
-        public SnapshotMessage(string clientId, long revision, string levelData)
-        {
-            ClientId = clientId;
-            Revision = revision;
-            LevelData = levelData;
-        }
+        public string ClientId { get; }
+        public long Revision { get; }
+        public string LevelData { get; }
+        public SnapshotMessage(string clientId, long revision, string levelData) { ClientId = clientId; Revision = revision; LevelData = levelData; }
     }
 }
