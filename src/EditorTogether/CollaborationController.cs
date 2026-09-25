@@ -10,9 +10,12 @@ namespace EditorTogether
     {
         private readonly UnityModManager.ModEntry.ModLogger logger;
         private readonly WebSocketTransport transport;
+        private static readonly System.Reflection.FieldInfo SaveStateLastFrameField =
+            AccessTools.Field(typeof(scnEditor), "saveStateLastFrame");
         private scnEditor lastEditor;
         private bool dirty;
         private float dirtyElapsed;
+        private int observedSaveStateFrame = int.MinValue;
         private const float DebounceDelay = 0.20f;
 
         public bool IsApplyingRemote { get; private set; }
@@ -33,6 +36,7 @@ namespace EditorTogether
             if (lastEditor == null)
                 throw new InvalidOperationException("Open a chart in the editor before creating a room.");
 
+            ResetSaveStateObservation(lastEditor);
             logger.Log("[Collab] room created; publishing host snapshot");
             PublishSnapshot(lastEditor);
         }
@@ -41,6 +45,7 @@ namespace EditorTogether
         {
             await ConnectCoreAsync(url).ConfigureAwait(false);
             TryFindEditor();
+            if (lastEditor != null) ResetSaveStateObservation(lastEditor);
             logger.Log("[Collab] joined room; waiting for host snapshot (local chart will NOT be published)");
         }
 
@@ -55,15 +60,37 @@ namespace EditorTogether
             if (lastEditor != null) return;
             try { lastEditor = UnityEngine.Object.FindFirstObjectByType<scnEditor>(); }
             catch { lastEditor = UnityEngine.Object.FindObjectOfType<scnEditor>(); }
+            if (lastEditor != null) ResetSaveStateObservation(lastEditor);
+        }
+
+        private static int ReadSaveStateLastFrame(scnEditor editor)
+        {
+            if (editor == null || SaveStateLastFrameField == null) return int.MinValue;
+            return (int)SaveStateLastFrameField.GetValue(editor);
+        }
+
+        private void ResetSaveStateObservation(scnEditor editor)
+        {
+            observedSaveStateFrame = ReadSaveStateLastFrame(editor);
+        }
+
+        private void ObserveEditorMutation(scnEditor editor)
+        {
+            if (!transport.IsConnected || IsApplyingRemote) return;
+
+            int frame = ReadSaveStateLastFrame(editor);
+            if (frame == int.MinValue || frame == observedSaveStateFrame) return;
+
+            observedSaveStateFrame = frame;
+            dirty = true;
+            dirtyElapsed = 0f;
         }
 
         public void OnEditorStateSaved(scnEditor editor)
         {
-            if (editor == null) return;
-            lastEditor = editor;
-            if (!transport.IsConnected || IsApplyingRemote) return;
-            dirty = true;
-            dirtyElapsed = 0f;
+            // Kept for compatibility with older patch wiring. Mutation detection now polls
+            // scnEditor's own saveStateLastFrame marker instead of depending on a Harmony hook.
+            if (editor != null) lastEditor = editor;
         }
 
         private void PublishSnapshot(scnEditor editor)
@@ -85,9 +112,12 @@ namespace EditorTogether
         {
             TryFindEditor();
             if (lastEditor == null) return;
+
             SnapshotMessage newest = null;
             while (transport.TryDequeue(out SnapshotMessage message)) newest = message;
             if (newest != null) ApplyRemoteSnapshot(lastEditor, newest);
+
+            ObserveEditorMutation(lastEditor);
             if (!dirty || !transport.IsConnected || IsApplyingRemote) return;
             dirtyElapsed += deltaTime > 0f ? deltaTime : UnityEngine.Time.unscaledDeltaTime;
             if (dirtyElapsed < DebounceDelay) return;
@@ -112,6 +142,7 @@ namespace EditorTogether
                 AccessTools.Method(typeof(scnEditor), "UpdateDecorationObjects")?.Invoke(editor, null);
                 dirty = false;
                 dirtyElapsed = 0f;
+                ResetSaveStateObservation(editor);
                 Revision = Math.Max(Revision, snapshot.Revision);
                 logger.Log($"[Collab] applied remote snapshot; revision={snapshot.Revision}, from={snapshot.ClientId}, loadResult={loadResult}");
             });
