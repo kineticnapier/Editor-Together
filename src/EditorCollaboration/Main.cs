@@ -36,7 +36,7 @@ namespace EditorCollaboration
 
         private static void OnUpdate(UnityModManager.ModEntry modEntry, float deltaTime)
         {
-            Controller?.Update();
+            Controller?.Update(deltaTime);
         }
 
         private static void OnGUI(UnityModManager.ModEntry modEntry)
