@@ -1,86 +1,105 @@
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
+using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
-app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(20) });
 
-var rooms = new ConcurrentDictionary<string, ConcurrentDictionary<Guid, WebSocket>>(StringComparer.Ordinal);
+var rooms = new ConcurrentDictionary<string, ConcurrentDictionary<Guid, WebSocket>>();
 
-app.MapGet("/", () => Results.Text("EditorCollaboration relay is running."));
+app.UseWebSockets(new WebSocketOptions
+{
+    KeepAliveInterval = TimeSpan.FromSeconds(30)
+});
+
+app.MapGet("/", () => Results.Text("EditorCollaboration.Server is running."));
 
 app.Map("/ws", async context =>
 {
     if (!context.WebSockets.IsWebSocketRequest)
     {
         context.Response.StatusCode = StatusCodes.Status400BadRequest;
+        await context.Response.WriteAsync("WebSocket required.");
         return;
     }
 
-    string room = context.Request.Query["room"].FirstOrDefault() ?? "default";
-    if (room.Length > 64)
-    {
-        context.Response.StatusCode = StatusCodes.Status400BadRequest;
-        return;
-    }
+    var roomName = context.Request.Query["room"].ToString();
+    if (string.IsNullOrWhiteSpace(roomName))
+        roomName = "default";
 
-    using WebSocket socket = await context.WebSockets.AcceptWebSocketAsync();
-    Guid connectionId = Guid.NewGuid();
-    var clients = rooms.GetOrAdd(room, _ => new ConcurrentDictionary<Guid, WebSocket>());
-    clients[connectionId] = socket;
-    Console.WriteLine($"[{room}] + {connectionId} ({clients.Count} clients)");
+    var socket = await context.WebSockets.AcceptWebSocketAsync();
+    var connectionId = Guid.NewGuid();
+    var room = rooms.GetOrAdd(roomName, _ => new ConcurrentDictionary<Guid, WebSocket>());
+    room[connectionId] = socket;
 
-    byte[] buffer = new byte[64 * 1024];
+    Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] + {connectionId:N} room={roomName} clients={room.Count}");
+
+    var buffer = new byte[64 * 1024];
     try
     {
         while (socket.State == WebSocketState.Open)
         {
-            using var stream = new MemoryStream();
+            using var message = new MemoryStream();
             WebSocketReceiveResult result;
             do
             {
                 result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), context.RequestAborted);
                 if (result.MessageType == WebSocketMessageType.Close)
-                {
-                    await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
-                    return;
-                }
-                stream.Write(buffer, 0, result.Count);
+                    break;
+                await message.WriteAsync(buffer.AsMemory(0, result.Count), context.RequestAborted);
             }
             while (!result.EndOfMessage);
 
+            if (result.MessageType == WebSocketMessageType.Close)
+                break;
             if (result.MessageType != WebSocketMessageType.Text)
                 continue;
 
-            byte[] message = stream.ToArray();
-            foreach (var pair in clients.ToArray())
+            var payload = message.ToArray();
+            Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] > {connectionId:N} room={roomName} bytes={payload.Length}");
+
+            foreach (var peer in room.ToArray())
             {
-                WebSocket peer = pair.Value;
-                if (peer.State != WebSocketState.Open)
+                if (peer.Key == connectionId || peer.Value.State != WebSocketState.Open)
                     continue;
 
                 try
                 {
-                    await peer.SendAsync(new ArraySegment<byte>(message), WebSocketMessageType.Text, true, context.RequestAborted);
+                    await peer.Value.SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Text, true, context.RequestAborted);
                 }
-                catch
+                catch (Exception ex)
                 {
-                    clients.TryRemove(pair.Key, out _);
+                    Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] ! send {peer.Key:N}: {ex.Message}");
                 }
             }
         }
     }
-    catch (OperationCanceledException) { }
+    catch (OperationCanceledException)
+    {
+    }
     catch (WebSocketException ex)
     {
-        Console.WriteLine($"[{room}] websocket error for {connectionId}: {ex.Message}");
+        Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] ! socket {connectionId:N}: {ex.Message}");
     }
     finally
     {
-        clients.TryRemove(connectionId, out _);
-        if (clients.IsEmpty)
-            rooms.TryRemove(room, out _);
-        Console.WriteLine($"[{room}] - {connectionId} ({clients.Count} clients)");
+        room.TryRemove(connectionId, out _);
+        if (room.IsEmpty)
+            rooms.TryRemove(roomName, out _);
+
+        if (socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
+        {
+            try
+            {
+                await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
+            }
+            catch
+            {
+            }
+        }
+
+        socket.Dispose();
+        Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] - {connectionId:N} room={roomName} clients={room.Count}");
     }
 });
 
