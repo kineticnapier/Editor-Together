@@ -40,7 +40,7 @@ Then edit only one client at a time for this prototype. Test BPM/property change
 
 Known v0.0.2 limitations:
 
-- revisions are currently client-generated, not server-authoritative;
+- revision values are currently per-client diagnostic counters only;
 - simultaneous edits can diverge and are intentionally not supported yet;
 - reconnect does not fetch the latest room snapshot;
 - collaborative Undo/Redo semantics are not implemented;
