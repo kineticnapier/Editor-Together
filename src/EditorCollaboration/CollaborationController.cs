@@ -6,7 +6,6 @@ namespace EditorCollaboration
     internal sealed class CollaborationController : IDisposable
     {
         private readonly UnityModManager.ModEntry.ModLogger logger;
-        private int rootDepth;
         private bool rootChangesData;
 
         public bool IsApplyingRemote { get; private set; }
@@ -22,30 +21,27 @@ namespace EditorCollaboration
             if (editor == null || IsApplyingRemote)
                 return;
 
-            // changingState is still the pre-constructor value here.
-            if (editor.changingState == 0)
-            {
-                rootDepth = 1;
-                rootChangesData = dataHasChanged && !skipSaving;
-                if (rootChangesData)
-                    logger.Log("[Collab] root edit started");
+            // Harmony constructor prefixes run before SaveStateScope increments
+            // scnEditor.changingState. Therefore 0 means this is the outermost scope.
+            if (editor.changingState != 0)
                 return;
-            }
 
-            if (rootDepth > 0)
-                rootDepth++;
+            rootChangesData = dataHasChanged && !skipSaving;
+            if (rootChangesData)
+                logger.Log("[Collab] root edit started");
         }
 
         public void OnScopeDisposed(scnEditor editor)
         {
-            if (editor == null || IsApplyingRemote || rootDepth == 0)
+            if (editor == null || IsApplyingRemote)
                 return;
 
-            rootDepth--;
-            if (rootDepth != 0)
+            // Harmony Dispose postfix runs after SaveStateScope decrements
+            // changingState, so only the outermost scope reaches zero here.
+            if (editor.changingState != 0)
                 return;
 
-            bool shouldPublish = rootChangesData && editor.changingState == 0;
+            bool shouldPublish = rootChangesData;
             rootChangesData = false;
             if (!shouldPublish)
                 return;
@@ -56,11 +52,10 @@ namespace EditorCollaboration
         private void PublishSnapshot(scnEditor editor)
         {
             Revision++;
+            string encodedLevel = editor.levelData.Encode();
+            logger.Log($"[Collab] root edit committed; revision={Revision}, bytes={encodedLevel.Length}, events={editor.events.Count}, decorations={editor.decorations.Count}");
 
-            // v0.0.1 transport is intentionally not wired yet. This establishes the
-            // correct editor transaction boundary before networking is introduced.
-            LevelData snapshot = editor.levelData.Copy();
-            logger.Log($"[Collab] root edit committed; revision={Revision}, events={snapshot.levelEvents.Count}, decorations={snapshot.decorations.Count}");
+            // TODO(v0.0.1): hand encodedLevel to the transport layer.
         }
 
         public void ApplyRemote(Action apply)
