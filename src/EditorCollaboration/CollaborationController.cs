@@ -96,18 +96,14 @@ namespace EditorCollaboration
             if (lastEditor == null)
                 return;
 
-            // Full-snapshot prototype: collapse a burst to the newest received snapshot.
+            // Revisions are client-local in v0.0.2, so do not compare revisions from
+            // different clients yet. Simply collapse each frame's burst to the last packet.
             SnapshotMessage newest = null;
             while (transport.TryDequeue(out SnapshotMessage message))
-            {
-                if (message.Revision >= Revision)
-                    newest = message;
-            }
+                newest = message;
 
-            if (newest == null)
-                return;
-
-            ApplyRemoteSnapshot(lastEditor, newest);
+            if (newest != null)
+                ApplyRemoteSnapshot(lastEditor, newest);
         }
 
         private void ApplyRemoteSnapshot(scnEditor editor, SnapshotMessage snapshot)
@@ -125,13 +121,10 @@ namespace EditorCollaboration
 
                 editor.customLevel.levelData = levelData;
                 editor.RemakePath(true, true);
-
-                // Undo/redo uses the same levelData replacement followed by RemakePath and
-                // decoration refresh. The latter is private in scnEditor, so invoke it here.
                 AccessTools.Method(typeof(scnEditor), "UpdateDecorationObjects")?.Invoke(editor, null);
 
                 Revision = Math.Max(Revision, snapshot.Revision);
-                logger.Log($"[Collab] applied remote snapshot; revision={Revision}, from={snapshot.ClientId}, loadResult={loadResult}");
+                logger.Log($"[Collab] applied remote snapshot; revision={snapshot.Revision}, from={snapshot.ClientId}, loadResult={loadResult}");
             });
         }
 
