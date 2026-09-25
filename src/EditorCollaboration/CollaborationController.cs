@@ -11,11 +11,9 @@ namespace EditorCollaboration
         private readonly UnityModManager.ModEntry.ModLogger logger;
         private readonly WebSocketTransport transport;
         private scnEditor lastEditor;
-        private string lastObservedLevel;
-        private float pollElapsed;
-        private float dirtyElapsed = -1f;
-        private const float PollInterval = 0.10f;
-        private const float DebounceDelay = 0.15f;
+        private bool dirty;
+        private float dirtyElapsed;
+        private const float DebounceDelay = 0.20f;
 
         public bool IsApplyingRemote { get; private set; }
         public long Revision { get; private set; }
@@ -35,16 +33,14 @@ namespace EditorCollaboration
             if (lastEditor == null)
                 throw new InvalidOperationException("Open a chart in the editor before creating a room.");
 
-            lastObservedLevel = lastEditor.levelData.Encode();
             logger.Log("[Collab] room created; publishing host snapshot");
-            PublishSnapshot(lastEditor, lastObservedLevel);
+            PublishSnapshot(lastEditor);
         }
 
         public async System.Threading.Tasks.Task JoinRoomAsync(string url)
         {
             await ConnectCoreAsync(url).ConfigureAwait(false);
             TryFindEditor();
-            lastObservedLevel = lastEditor != null ? lastEditor.levelData.Encode() : null;
             logger.Log("[Collab] joined room; waiting for host snapshot (local chart will NOT be published)");
         }
 
@@ -76,21 +72,28 @@ namespace EditorCollaboration
             }
         }
 
-        // Kept for compatibility with the current Harmony patch. Polling below is
-        // authoritative because editor mutations do not all cross the same save hook.
         public void OnEditorStateSaved(scnEditor editor)
         {
-            if (editor != null)
-                lastEditor = editor;
+            if (editor == null)
+                return;
+
+            lastEditor = editor;
+            if (!transport.IsConnected || IsApplyingRemote)
+                return;
+
+            // SaveState runs at the start of many editor operations. Do not Encode here:
+            // just remember that something is changing, then serialize once after the
+            // operation has had time to finish.
+            dirty = true;
+            dirtyElapsed = 0f;
         }
 
-        private void PublishSnapshot(scnEditor editor, string encodedLevel = null)
+        private void PublishSnapshot(scnEditor editor)
         {
             if (!transport.IsConnected)
                 return;
 
-            encodedLevel = encodedLevel ?? editor.levelData.Encode();
-            lastObservedLevel = encodedLevel;
+            string encodedLevel = editor.levelData.Encode();
             Revision++;
             logger.Log($"[Collab] snapshot published; revision={Revision}, bytes={encodedLevel.Length}, events={editor.events.Count}, decorations={editor.decorations.Count}");
             _ = SendSnapshotAsync(Revision, encodedLevel);
@@ -121,50 +124,24 @@ namespace EditorCollaboration
             if (newest != null)
                 ApplyRemoteSnapshot(lastEditor, newest);
 
-            if (!transport.IsConnected || IsApplyingRemote)
+            if (!dirty || !transport.IsConnected || IsApplyingRemote)
                 return;
 
-            pollElapsed += deltaTime > 0f ? deltaTime : UnityEngine.Time.unscaledDeltaTime;
-            if (pollElapsed >= PollInterval)
-            {
-                pollElapsed = 0f;
-                try
-                {
-                    string current = lastEditor.levelData.Encode();
-                    if (lastObservedLevel == null)
-                    {
-                        lastObservedLevel = current;
-                    }
-                    else if (!string.Equals(current, lastObservedLevel, StringComparison.Ordinal))
-                    {
-                        lastObservedLevel = current;
-                        dirtyElapsed = 0f;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    logger.Error("[Collab] level polling failed: " + ex.Message);
-                }
-            }
+            float dt = deltaTime > 0f ? deltaTime : UnityEngine.Time.unscaledDeltaTime;
+            dirtyElapsed += dt;
+            if (dirtyElapsed < DebounceDelay)
+                return;
 
-            if (dirtyElapsed >= 0f)
+            dirty = false;
+            dirtyElapsed = 0f;
+            try
             {
-                dirtyElapsed += deltaTime > 0f ? deltaTime : UnityEngine.Time.unscaledDeltaTime;
-                if (dirtyElapsed >= DebounceDelay)
-                {
-                    dirtyElapsed = -1f;
-                    try
-                    {
-                        string stable = lastEditor.levelData.Encode();
-                        lastObservedLevel = stable;
-                        logger.Log("[Collab] live LevelData change detected");
-                        PublishSnapshot(lastEditor, stable);
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.Error("[Collab] live snapshot failed: " + ex.Message);
-                    }
-                }
+                logger.Log("[Collab] editor mutation settled; publishing snapshot");
+                PublishSnapshot(lastEditor);
+            }
+            catch (Exception ex)
+            {
+                logger.Error("[Collab] live snapshot failed: " + ex.Message);
             }
         }
 
@@ -185,8 +162,9 @@ namespace EditorCollaboration
                 editor.RemakePath(true, true);
                 AccessTools.Method(typeof(scnEditor), "UpdateDecorationObjects")?.Invoke(editor, null);
 
-                lastObservedLevel = snapshot.LevelData;
-                dirtyElapsed = -1f;
+                // A remote RemakePath must never turn into a local outgoing edit.
+                dirty = false;
+                dirtyElapsed = 0f;
                 Revision = Math.Max(Revision, snapshot.Revision);
                 logger.Log($"[Collab] applied remote snapshot; revision={snapshot.Revision}, from={snapshot.ClientId}, loadResult={loadResult}");
             });
