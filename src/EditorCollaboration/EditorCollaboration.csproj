@@ -37,7 +37,6 @@
       <HintPath>$(ADOFAIManagedPath)\UnityEngine.IMGUIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
-    <Reference Include="System.Web.Extensions" />
     <Reference Include="System.Net.WebSockets" />
     <Reference Include="System.Net.WebSockets.Client" />
   </ItemGroup>
