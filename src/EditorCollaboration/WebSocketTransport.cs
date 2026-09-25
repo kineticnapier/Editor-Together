@@ -6,7 +6,7 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Web.Script.Serialization;
+using GDMiniJSON;
 using UnityModManagerNet;
 
 namespace EditorCollaboration
@@ -18,7 +18,6 @@ namespace EditorCollaboration
         private readonly CancellationTokenSource cancellation = new CancellationTokenSource();
         private readonly string clientId = Guid.NewGuid().ToString("N");
         private readonly SemaphoreSlim sendLock = new SemaphoreSlim(1, 1);
-        private readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
         private ClientWebSocket socket;
 
         public string ClientId => clientId;
@@ -54,7 +53,7 @@ namespace EditorCollaboration
                 ["revision"] = revision,
                 ["levelData"] = encodedLevel
             };
-            byte[] payload = Encoding.UTF8.GetBytes(json.Serialize(envelope));
+            byte[] payload = Encoding.UTF8.GetBytes(Json.Serialize(envelope));
 
             await sendLock.WaitAsync(cancellation.Token).ConfigureAwait(false);
             try
@@ -95,7 +94,7 @@ namespace EditorCollaboration
                             continue;
 
                         string jsonText = Encoding.UTF8.GetString(stream.ToArray());
-                        var obj = json.DeserializeObject(jsonText) as Dictionary<string, object>;
+                        var obj = Json.Deserialize(jsonText) as Dictionary<string, object>;
                         if (obj == null || !obj.TryGetValue("type", out object type) || !string.Equals(type as string, "snapshot", StringComparison.Ordinal))
                             continue;
 
