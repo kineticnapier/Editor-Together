@@ -29,10 +29,35 @@ namespace EditorCollaboration
             try
             {
                 await transport.ConnectAsync(url).ConfigureAwait(false);
+                TryFindEditor();
+                if (lastEditor != null)
+                {
+                    logger.Log("[Collab] connected with an open editor; publishing initial host snapshot");
+                    PublishSnapshot(lastEditor);
+                }
+                else
+                {
+                    logger.Log("[Collab] connected without an open editor; waiting for room snapshot or first edit");
+                }
             }
             catch (Exception ex)
             {
                 logger.Error($"[Collab] connection failed: {ex.Message}");
+            }
+        }
+
+        private void TryFindEditor()
+        {
+            if (lastEditor != null)
+                return;
+
+            try
+            {
+                lastEditor = UnityEngine.Object.FindFirstObjectByType<scnEditor>();
+            }
+            catch
+            {
+                lastEditor = UnityEngine.Object.FindObjectOfType<scnEditor>();
             }
         }
 
@@ -71,7 +96,7 @@ namespace EditorCollaboration
         {
             Revision++;
             string encodedLevel = editor.levelData.Encode();
-            logger.Log($"[Collab] root edit committed; revision={Revision}, bytes={encodedLevel.Length}, events={editor.events.Count}, decorations={editor.decorations.Count}");
+            logger.Log($"[Collab] snapshot published; revision={Revision}, bytes={encodedLevel.Length}, events={editor.events.Count}, decorations={editor.decorations.Count}");
             _ = SendSnapshotAsync(Revision, encodedLevel);
         }
 
@@ -89,6 +114,7 @@ namespace EditorCollaboration
 
         public void Update()
         {
+            TryFindEditor();
             if (lastEditor == null)
                 return;
 
