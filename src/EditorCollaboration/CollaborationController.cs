@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
-using System.Web.Script.Serialization;
 using ADOFAI;
+using GDMiniJSON;
 using HarmonyLib;
 using UnityModManagerNet;
 
@@ -11,7 +11,6 @@ namespace EditorCollaboration
     {
         private readonly UnityModManager.ModEntry.ModLogger logger;
         private readonly WebSocketTransport transport;
-        private readonly JavaScriptSerializer json = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
         private bool rootChangesData;
         private scnEditor lastEditor;
 
@@ -106,7 +105,7 @@ namespace EditorCollaboration
         {
             ApplyRemote(() =>
             {
-                var dictionary = json.DeserializeObject(snapshot.LevelData) as Dictionary<string, object>;
+                var dictionary = Json.Deserialize(snapshot.LevelData) as Dictionary<string, object>;
                 if (dictionary == null)
                     throw new InvalidOperationException("Remote LevelData was not a JSON object.");
 
