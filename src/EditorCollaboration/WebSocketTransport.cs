@@ -16,8 +16,8 @@ namespace EditorCollaboration
         private readonly ConcurrentQueue<SnapshotMessage> received = new ConcurrentQueue<SnapshotMessage>();
         private readonly CancellationTokenSource cancellation = new CancellationTokenSource();
         private readonly string clientId = Guid.NewGuid().ToString("N");
-        private ClientWebSocket socket;
         private readonly SemaphoreSlim sendLock = new SemaphoreSlim(1, 1);
+        private ClientWebSocket socket;
 
         public string ClientId => clientId;
         public bool IsConnected => socket != null && socket.State == WebSocketState.Open;
@@ -94,15 +94,17 @@ namespace EditorCollaboration
 
                         string json = Encoding.UTF8.GetString(stream.ToArray());
                         var obj = Json.Deserialize(json) as Dictionary<string, object>;
-                        if (obj == null || !obj.TryGetValue("type", out object type) || (string)type != "snapshot")
+                        if (obj == null || !obj.TryGetValue("type", out object type) || !string.Equals(type as string, "snapshot", StringComparison.Ordinal))
                             continue;
 
-                        string sender = obj["clientId"] as string;
-                        if (sender == clientId)
+                        string sender = obj.TryGetValue("clientId", out object senderValue) ? senderValue as string : null;
+                        if (string.IsNullOrEmpty(sender) || sender == clientId)
+                            continue;
+                        if (!obj.TryGetValue("revision", out object revisionValue) || !obj.TryGetValue("levelData", out object levelValue))
                             continue;
 
-                        long revision = Convert.ToInt64(obj["revision"]);
-                        string levelData = obj["levelData"] as string;
+                        long revision = Convert.ToInt64(revisionValue);
+                        string levelData = levelValue as string;
                         if (!string.IsNullOrEmpty(levelData))
                             received.Enqueue(new SnapshotMessage(sender, revision, levelData));
                     }
