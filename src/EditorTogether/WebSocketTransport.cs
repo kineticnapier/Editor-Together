@@ -16,7 +16,6 @@ namespace EditorTogether
         private readonly ClientWebSocket socket = new ClientWebSocket();
         private readonly ConcurrentQueue<SnapshotMessage> incoming = new ConcurrentQueue<SnapshotMessage>();
         private readonly CancellationTokenSource cancellation = new CancellationTokenSource();
-        private Task receiveTask;
         public string ClientId { get; } = Guid.NewGuid().ToString("N");
         public bool IsConnected => socket.State == WebSocketState.Open;
 
@@ -27,7 +26,7 @@ namespace EditorTogether
             if (IsConnected) return;
             await socket.ConnectAsync(new Uri(url), cancellation.Token).ConfigureAwait(false);
             logger.Log($"[Collab] connected to {url} as {ClientId}");
-            receiveTask = Task.Run(ReceiveLoopAsync);
+            _ = Task.Run(ReceiveLoopAsync);
         }
 
         public async Task SendSnapshotAsync(long revision, string levelData)

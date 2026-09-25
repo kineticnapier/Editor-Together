@@ -3,6 +3,6 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AssemblyName>EditorCollaboration.Server</AssemblyName>
+    <AssemblyName>EditorTogether.Server</AssemblyName>
   </PropertyGroup>
 </Project>

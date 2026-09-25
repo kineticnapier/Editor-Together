@@ -3,13 +3,13 @@
     <TargetFramework>net48</TargetFramework>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
-    <AssemblyName>EditorCollaboration</AssemblyName>
-    <RootNamespace>EditorCollaboration</RootNamespace>
+    <AssemblyName>EditorTogether</AssemblyName>
+    <RootNamespace>EditorTogether</RootNamespace>
     <Version>0.0.2</Version>
     <ADOFAIManagedPath Condition="'$(ADOFAIManagedPath)' == ''">C:\Program Files (x86)\Steam\steamapps\common\A Dance of Fire and Ice\A Dance of Fire and Ice_Data\Managed</ADOFAIManagedPath>
     <PackageDir>$(MSBuildProjectDirectory)\..\..\dist</PackageDir>
     <PackageStageDir>$(BaseIntermediateOutputPath)umm-package</PackageStageDir>
-    <PackageZip>$(PackageDir)\EditorCollaboration-v$(Version).zip</PackageZip>
+    <PackageZip>$(PackageDir)\EditorTogether-v$(Version).zip</PackageZip>
   </PropertyGroup>
 
   <ItemGroup>
