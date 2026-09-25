@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
-using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
@@ -40,7 +39,7 @@ app.Map("/ws", async context =>
             WebSocketReceiveResult result;
             do
             {
-                result = await socket.ReceiveAsync(buffer, context.RequestAborted);
+                result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), context.RequestAborted);
                 if (result.MessageType == WebSocketMessageType.Close)
                 {
                     await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
@@ -62,7 +61,7 @@ app.Map("/ws", async context =>
 
                 try
                 {
-                    await peer.SendAsync(message, WebSocketMessageType.Text, true, context.RequestAborted);
+                    await peer.SendAsync(new ArraySegment<byte>(message), WebSocketMessageType.Text, true, context.RequestAborted);
                 }
                 catch
                 {
