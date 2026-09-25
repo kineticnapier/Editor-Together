@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using ADOFAI;
-using GDMiniJSON;
 using HarmonyLib;
 using UnityModManagerNet;
 
@@ -105,7 +104,7 @@ namespace EditorCollaboration
         {
             ApplyRemote(() =>
             {
-                var dictionary = Json.Deserialize(snapshot.LevelData) as Dictionary<string, object>;
+                var dictionary = RuntimeJson.Deserialize(snapshot.LevelData) as Dictionary<string, object>;
                 if (dictionary == null)
                     throw new InvalidOperationException("Remote LevelData was not a JSON object.");
 
