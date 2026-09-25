@@ -5,7 +5,11 @@
     <Nullable>disable</Nullable>
     <AssemblyName>EditorCollaboration</AssemblyName>
     <RootNamespace>EditorCollaboration</RootNamespace>
+    <Version>0.0.2</Version>
     <ADOFAIManagedPath Condition="'$(ADOFAIManagedPath)' == ''">C:\Program Files (x86)\Steam\steamapps\common\A Dance of Fire and Ice\A Dance of Fire and Ice_Data\Managed</ADOFAIManagedPath>
+    <PackageDir>$(MSBuildProjectDirectory)\..\..\dist</PackageDir>
+    <PackageStageDir>$(BaseIntermediateOutputPath)umm-package</PackageStageDir>
+    <PackageZip>$(PackageDir)\EditorCollaboration-v$(Version).zip</PackageZip>
   </PropertyGroup>
 
   <ItemGroup>
@@ -37,4 +41,15 @@
     <Reference Include="System.Net.WebSockets" />
     <Reference Include="System.Net.WebSockets.Client" />
   </ItemGroup>
+
+  <Target Name="PackageForUnityModManager" AfterTargets="Build">
+    <RemoveDir Directories="$(PackageStageDir)" />
+    <MakeDir Directories="$(PackageStageDir)" />
+    <MakeDir Directories="$(PackageDir)" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(PackageStageDir)" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\Info.json" DestinationFolder="$(PackageStageDir)" />
+    <Delete Files="$(PackageZip)" Condition="Exists('$(PackageZip)')" />
+    <ZipDirectory SourceDirectory="$(PackageStageDir)" DestinationFile="$(PackageZip)" Overwrite="true" />
+    <Message Importance="high" Text="UMM package: $(PackageZip)" />
+  </Target>
 </Project>
