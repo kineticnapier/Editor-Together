@@ -32,6 +32,8 @@ ws://127.0.0.1:38241/ws?room=default
 
 Set the `EDITORCOLLAB_URL` environment variable before launching ADOFAI to use another relay or room. For example, on another PC in the same LAN, point it at the relay PC's LAN address.
 
+The prototype relay has no authentication. Keep it on a trusted network while testing; authentication and room access control belong in a later version.
+
 ## First two-PC test
 
 Both clients should load the same starting level. Start the relay, launch ADOFAI with the mod on both PCs, and confirm both logs contain `[Collab] connected`.
