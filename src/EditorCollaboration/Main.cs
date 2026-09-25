@@ -37,8 +37,6 @@ namespace EditorCollaboration
         private static void OnUpdate(UnityModManager.ModEntry modEntry, float deltaTime)
         {
             Controller?.Update();
-            if (Controller != null && Controller.IsConnected)
-                status = "Connected";
         }
 
         private static void OnGUI(UnityModManager.ModEntry modEntry)
@@ -58,8 +56,12 @@ namespace EditorCollaboration
 
             GUILayout.Space(6f);
             GUI.enabled = Controller != null && !Controller.IsConnected && !connecting;
-            if (GUILayout.Button(connecting ? "Connecting..." : "Connect", GUILayout.Width(130f)))
-                _ = ConnectFromUiAsync();
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button(connecting ? "Connecting..." : "Create Room", GUILayout.Width(130f)))
+                _ = ConnectFromUiAsync(true);
+            if (GUILayout.Button(connecting ? "Connecting..." : "Join Room", GUILayout.Width(130f)))
+                _ = ConnectFromUiAsync(false);
+            GUILayout.EndHorizontal();
             GUI.enabled = true;
 
             GUILayout.Space(6f);
@@ -70,21 +72,27 @@ namespace EditorCollaboration
                 GUILayout.Label("Revision: " + Controller.Revision);
             }
             GUILayout.Space(4f);
-            GUILayout.Label("Prototype: both users should open the same initial chart before connecting.");
+            GUILayout.Label("Create Room: publishes your open chart. Join Room: receives the room chart without publishing your local chart.");
         }
 
-        private static async System.Threading.Tasks.Task ConnectFromUiAsync()
+        private static async System.Threading.Tasks.Task ConnectFromUiAsync(bool createRoom)
         {
             if (Controller == null || connecting)
                 return;
 
             connecting = true;
-            status = "Connecting...";
+            status = createRoom ? "Creating room..." : "Joining room...";
             try
             {
                 string url = BuildRoomUrl(serverUrl, room);
-                await Controller.ConnectAsync(url).ConfigureAwait(false);
-                status = Controller.IsConnected ? "Connected" : "Connection failed (see log)";
+                if (createRoom)
+                    await Controller.CreateRoomAsync(url).ConfigureAwait(false);
+                else
+                    await Controller.JoinRoomAsync(url).ConfigureAwait(false);
+
+                status = Controller.IsConnected
+                    ? (createRoom ? "Connected (Host)" : "Connected (Joined)")
+                    : "Connection failed (see log)";
             }
             catch (Exception ex)
             {
