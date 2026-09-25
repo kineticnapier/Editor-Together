@@ -1,0 +1,9 @@
+{
+  "Id": "EditorCollaboration",
+  "DisplayName": "Editor Collaboration",
+  "Author": "kineticnapier",
+  "Version": "0.0.1",
+  "ManagerVersion": "0.27.10",
+  "AssemblyName": "EditorCollaboration.dll",
+  "EntryMethod": "EditorCollaboration.Main.Load"
+}
