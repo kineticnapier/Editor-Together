@@ -21,5 +21,7 @@
       <HintPath>lib/UnityModManager.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="System.Net.WebSockets" />
+    <Reference Include="System.Net.WebSockets.Client" />
   </ItemGroup>
 </Project>
