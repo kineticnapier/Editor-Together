@@ -24,25 +24,34 @@ namespace EditorCollaboration
             transport = new WebSocketTransport(logger);
         }
 
-        public async System.Threading.Tasks.Task ConnectAsync(string url)
+        public async System.Threading.Tasks.Task CreateRoomAsync(string url)
+        {
+            await ConnectCoreAsync(url).ConfigureAwait(false);
+            TryFindEditor();
+            if (lastEditor == null)
+                throw new InvalidOperationException("Open a chart in the editor before creating a room.");
+
+            logger.Log("[Collab] room created; publishing host snapshot");
+            PublishSnapshot(lastEditor);
+        }
+
+        public async System.Threading.Tasks.Task JoinRoomAsync(string url)
+        {
+            await ConnectCoreAsync(url).ConfigureAwait(false);
+            TryFindEditor();
+            logger.Log("[Collab] joined room; waiting for host snapshot (local chart will NOT be published)");
+        }
+
+        private async System.Threading.Tasks.Task ConnectCoreAsync(string url)
         {
             try
             {
                 await transport.ConnectAsync(url).ConfigureAwait(false);
-                TryFindEditor();
-                if (lastEditor != null)
-                {
-                    logger.Log("[Collab] connected with an open editor; publishing initial host snapshot");
-                    PublishSnapshot(lastEditor);
-                }
-                else
-                {
-                    logger.Log("[Collab] connected without an open editor; waiting for room snapshot or first edit");
-                }
             }
             catch (Exception ex)
             {
                 logger.Error($"[Collab] connection failed: {ex.Message}");
+                throw;
             }
         }
 
@@ -94,6 +103,9 @@ namespace EditorCollaboration
 
         private void PublishSnapshot(scnEditor editor)
         {
+            if (!transport.IsConnected)
+                return;
+
             Revision++;
             string encodedLevel = editor.levelData.Encode();
             logger.Log($"[Collab] snapshot published; revision={Revision}, bytes={encodedLevel.Length}, events={editor.events.Count}, decorations={editor.decorations.Count}");
