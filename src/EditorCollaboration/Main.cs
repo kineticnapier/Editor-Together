@@ -18,7 +18,7 @@ namespace EditorCollaboration
 
             modEntry.OnUpdate = OnUpdate;
             modEntry.OnUnload = Unload;
-            modEntry.Logger.Log("EditorCollaboration v0.0.1 prototype loaded.");
+            modEntry.Logger.Log("EditorCollaboration v0.0.2 prototype loaded.");
             return true;
         }
 
