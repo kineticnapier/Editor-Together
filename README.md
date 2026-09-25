@@ -2,9 +2,9 @@
 
 Experimental real-time collaboration for the ADOFAI editor.
 
-## v0.0.1 prototype
+## v0.0.2 prototype
 
-The first prototype intentionally synchronizes the complete `LevelData` after each outermost data-changing `SaveStateScope`. Fine-grained operations come later.
+The prototype intentionally synchronizes the complete `LevelData` after each outermost data-changing `SaveStateScope`. Fine-grained operations come later.
 
 Current flow:
 
@@ -38,7 +38,7 @@ Both clients should load the same starting level. Start the relay, launch ADOFAI
 
 Then edit only one client at a time for this prototype. Test BPM/property changes, floor insertion/deletion, event insertion/deletion, and decorations. The receiver should log `[Collab] applied remote snapshot`.
 
-Known v0.0.1 limitations:
+Known v0.0.2 limitations:
 
 - revisions are currently client-generated, not server-authoritative;
 - simultaneous edits can diverge and are intentionally not supported yet;
