@@ -10,7 +10,6 @@ namespace EditorCollaboration
     {
         private readonly UnityModManager.ModEntry.ModLogger logger;
         private readonly WebSocketTransport transport;
-        private bool rootChangesData;
         private scnEditor lastEditor;
 
         public bool IsApplyingRemote { get; private set; }
@@ -70,34 +69,13 @@ namespace EditorCollaboration
             }
         }
 
-        public void OnScopeEntering(scnEditor editor, bool dataHasChanged, bool skipSaving)
+        public void OnEditorStateSaved(scnEditor editor)
         {
-            if (editor == null || IsApplyingRemote)
+            if (editor == null || IsApplyingRemote || !transport.IsConnected)
                 return;
 
             lastEditor = editor;
-            if (editor.changingState != 0)
-                return;
-
-            rootChangesData = dataHasChanged && !skipSaving;
-            if (rootChangesData)
-                logger.Log("[Collab] root edit started");
-        }
-
-        public void OnScopeDisposed(scnEditor editor)
-        {
-            if (editor == null || IsApplyingRemote)
-                return;
-
-            lastEditor = editor;
-            if (editor.changingState != 0)
-                return;
-
-            bool shouldPublish = rootChangesData;
-            rootChangesData = false;
-            if (!shouldPublish)
-                return;
-
+            logger.Log("[Collab] editor data mutation detected via SaveState");
             PublishSnapshot(editor);
         }
 
