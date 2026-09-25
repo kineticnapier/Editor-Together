@@ -14,20 +14,16 @@ namespace EditorCollaboration
 
         public bool IsApplyingRemote { get; private set; }
         public long Revision { get; private set; }
+        public bool IsConnected => transport.IsConnected;
+        public string ClientId => transport.ClientId;
 
         public CollaborationController(UnityModManager.ModEntry.ModLogger logger)
         {
             this.logger = logger;
             transport = new WebSocketTransport(logger);
-
-            string url = Environment.GetEnvironmentVariable("EDITORCOLLAB_URL");
-            if (string.IsNullOrWhiteSpace(url))
-                url = "ws://127.0.0.1:38241/ws?room=default";
-
-            _ = ConnectAsync(url);
         }
 
-        private async System.Threading.Tasks.Task ConnectAsync(string url)
+        public async System.Threading.Tasks.Task ConnectAsync(string url)
         {
             try
             {
@@ -90,14 +86,11 @@ namespace EditorCollaboration
             }
         }
 
-        // Called by UMM on Unity's main thread. Network callbacks only enqueue data.
         public void Update()
         {
             if (lastEditor == null)
                 return;
 
-            // Revisions are client-local in v0.0.2, so do not compare revisions from
-            // different clients yet. Simply collapse each frame's burst to the last packet.
             SnapshotMessage newest = null;
             while (transport.TryDequeue(out SnapshotMessage message))
                 newest = message;
