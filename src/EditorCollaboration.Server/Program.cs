@@ -1,11 +1,10 @@
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
-using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
 
-var rooms = new ConcurrentDictionary<string, ConcurrentDictionary<Guid, WebSocket>>();
+var rooms = new ConcurrentDictionary<string, RoomState>();
 
 app.UseWebSockets(new WebSocketOptions
 {
@@ -29,10 +28,20 @@ app.Map("/ws", async context =>
 
     var socket = await context.WebSockets.AcceptWebSocketAsync();
     var connectionId = Guid.NewGuid();
-    var room = rooms.GetOrAdd(roomName, _ => new ConcurrentDictionary<Guid, WebSocket>());
-    room[connectionId] = socket;
+    var room = rooms.GetOrAdd(roomName, _ => new RoomState());
+    room.Clients[connectionId] = socket;
 
-    Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] + {connectionId:N} room={roomName} clients={room.Count}");
+    Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] + {connectionId:N} room={roomName} clients={room.Clients.Count}");
+
+    byte[]? initialSnapshot;
+    lock (room.Sync)
+        initialSnapshot = room.LatestSnapshot;
+
+    if (initialSnapshot != null && socket.State == WebSocketState.Open)
+    {
+        await socket.SendAsync(new ArraySegment<byte>(initialSnapshot), WebSocketMessageType.Text, true, context.RequestAborted);
+        Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] < initial snapshot -> {connectionId:N} room={roomName} bytes={initialSnapshot.Length}");
+    }
 
     var buffer = new byte[64 * 1024];
     try
@@ -56,9 +65,12 @@ app.Map("/ws", async context =>
                 continue;
 
             var payload = message.ToArray();
-            Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] > {connectionId:N} room={roomName} bytes={payload.Length}");
+            lock (room.Sync)
+                room.LatestSnapshot = payload;
 
-            foreach (var peer in room.ToArray())
+            Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] > {connectionId:N} room={roomName} bytes={payload.Length} (saved as latest)");
+
+            foreach (var peer in room.Clients.ToArray())
             {
                 if (peer.Key == connectionId || peer.Value.State != WebSocketState.Open)
                     continue;
@@ -83,9 +95,9 @@ app.Map("/ws", async context =>
     }
     finally
     {
-        room.TryRemove(connectionId, out _);
-        if (room.IsEmpty)
-            rooms.TryRemove(roomName, out _);
+        room.Clients.TryRemove(connectionId, out _);
+        // Keep the room and its latest snapshot alive even when the host disconnects.
+        // This is prototype in-memory state and disappears when the server process stops.
 
         if (socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
         {
@@ -99,8 +111,15 @@ app.Map("/ws", async context =>
         }
 
         socket.Dispose();
-        Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] - {connectionId:N} room={roomName} clients={room.Count}");
+        Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] - {connectionId:N} room={roomName} clients={room.Clients.Count}");
     }
 });
 
 app.Run("http://0.0.0.0:38241");
+
+sealed class RoomState
+{
+    public ConcurrentDictionary<Guid, WebSocket> Clients { get; } = new();
+    public object Sync { get; } = new();
+    public byte[]? LatestSnapshot { get; set; }
+}
