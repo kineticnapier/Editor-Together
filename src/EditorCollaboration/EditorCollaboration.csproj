@@ -13,6 +13,10 @@
       <HintPath>$(ADOFAIManagedPath)\Assembly-CSharp.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="RDTools">
+      <HintPath>$(ADOFAIManagedPath)\RDTools.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
     <Reference Include="0Harmony">
       <HintPath>$(ADOFAIManagedPath)\UnityModManager\0Harmony.dll</HintPath>
       <Private>false</Private>
@@ -29,6 +33,7 @@
       <HintPath>$(ADOFAIManagedPath)\UnityEngine.IMGUIModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
+    <Reference Include="System.Web.Extensions" />
     <Reference Include="System.Net.WebSockets" />
     <Reference Include="System.Net.WebSockets.Client" />
   </ItemGroup>
