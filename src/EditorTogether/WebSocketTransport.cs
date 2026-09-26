@@ -48,7 +48,7 @@ namespace EditorTogether
             return SendEnvelopeAsync(envelope);
         }
 
-        public Task SendPresenceAsync(string levelId, string displayName, IReadOnlyList<int> selectedFloors)
+        public Task SendPresenceAsync(string levelId, string displayName, bool isHost, bool leaving, IReadOnlyList<int> selectedFloors)
         {
             var floors = new List<object>();
             if (selectedFloors != null)
@@ -59,6 +59,8 @@ namespace EditorTogether
                 ["type"] = "presence",
                 ["clientId"] = ClientId,
                 ["displayName"] = displayName ?? string.Empty,
+                ["isHost"] = isHost,
+                ["leaving"] = leaving,
                 ["levelId"] = levelId ?? string.Empty,
                 ["selectedFloors"] = floors
             };
@@ -131,6 +133,8 @@ namespace EditorTogether
                         if (type == "presence")
                         {
                             string displayName = json.TryGetValue("displayName", out object nameObj) ? Convert.ToString(nameObj) : string.Empty;
+                            bool isHost = json.TryGetValue("isHost", out object hostObj) && Convert.ToBoolean(hostObj);
+                            bool leaving = json.TryGetValue("leaving", out object leavingObj) && Convert.ToBoolean(leavingObj);
                             var floors = new List<int>();
                             if (json.TryGetValue("selectedFloors", out object floorsObj) && floorsObj is IList list)
                             {
@@ -139,7 +143,7 @@ namespace EditorTogether
                                     try { floors.Add(Convert.ToInt32(list[i])); } catch { }
                                 }
                             }
-                            incomingPresence.Enqueue(new PresenceMessage(clientId, displayName, levelId, floors.ToArray()));
+                            incomingPresence.Enqueue(new PresenceMessage(clientId, displayName, isHost, leaving, levelId, floors.ToArray()));
                             continue;
                         }
 
@@ -190,12 +194,16 @@ namespace EditorTogether
     {
         public string ClientId { get; }
         public string DisplayName { get; }
+        public bool IsHost { get; }
+        public bool IsLeaving { get; }
         public string LevelId { get; }
         public int[] SelectedFloors { get; }
-        public PresenceMessage(string clientId, string displayName, string levelId, int[] selectedFloors)
+        public PresenceMessage(string clientId, string displayName, bool isHost, bool isLeaving, string levelId, int[] selectedFloors)
         {
             ClientId = clientId;
             DisplayName = displayName ?? string.Empty;
+            IsHost = isHost;
+            IsLeaving = isLeaving;
             LevelId = levelId;
             SelectedFloors = selectedFloors ?? Array.Empty<int>();
         }
