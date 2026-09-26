@@ -18,6 +18,7 @@ namespace EditorTogether
         private readonly List<int> lastPresenceFloors = new List<int>();
         private scnEditor lastEditor;
         private LevelData observedLevelData;
+        private string observedLevelPath = string.Empty;
         private bool dirty;
         private float dirtyElapsed;
         private int observedSaveStateFrame = int.MinValue;
@@ -80,7 +81,7 @@ namespace EditorTogether
             catch { }
             await transport.DisconnectAsync(isHost ? "Host disconnected" : "Client disconnected").ConfigureAwait(false);
             isHost = false; levelId = string.Empty; Revision = 0;
-            lastEditor = null; observedLevelData = null; observedSaveStateFrame = int.MinValue;
+            lastEditor = null; observedLevelData = null; observedLevelPath = string.Empty; observedSaveStateFrame = int.MinValue;
             ClearPresence();
             logger.Log("[Collab] disconnected");
         }
@@ -104,18 +105,37 @@ namespace EditorTogether
         }
 
         private static int ReadSaveStateLastFrame(scnEditor editor) => editor == null || SaveStateLastFrameField == null ? int.MinValue : (int)SaveStateLastFrameField.GetValue(editor);
-        private void ResetObservation(scnEditor editor) { observedSaveStateFrame = ReadSaveStateLastFrame(editor); observedLevelData = editor?.levelData; }
+        private static string ReadLevelPath() => ADOBase.levelPath ?? string.Empty;
+        private void ResetObservation(scnEditor editor)
+        {
+            observedSaveStateFrame = ReadSaveStateLastFrame(editor);
+            observedLevelData = editor?.levelData;
+            observedLevelPath = ReadLevelPath();
+        }
 
         private void ObserveEditor(scnEditor editor)
         {
             if (!transport.IsConnected || IsApplyingRemote) return;
-            if (!ReferenceEquals(observedLevelData, editor.levelData))
+
+            // LoadLevel mutates the existing LevelData in-place on current ADOFAI builds,
+            // so object identity alone does not reliably reveal that another chart was opened.
+            // ADOBase.levelPath changes as part of OpenLevelCo and is cheap to inspect every frame.
+            string currentLevelPath = ReadLevelPath();
+            bool levelPathChanged = !string.Equals(observedLevelPath, currentLevelPath, StringComparison.OrdinalIgnoreCase);
+            bool levelDataChanged = !ReferenceEquals(observedLevelData, editor.levelData);
+            if (levelPathChanged || levelDataChanged)
             {
+                string oldPath = observedLevelPath;
                 observedLevelData = editor.levelData;
+                observedLevelPath = currentLevelPath;
                 observedSaveStateFrame = ReadSaveStateLastFrame(editor);
                 dirty = false; dirtyElapsed = 0f;
                 ClearRemotePresenceOnly();
-                if (isHost) BeginNewLevel(editor, true);
+                if (isHost)
+                {
+                    logger.Log($"[Collab] detected host chart switch: '{oldPath}' -> '{currentLevelPath}'");
+                    BeginNewLevel(editor, true);
+                }
                 return;
             }
 
