@@ -4,6 +4,7 @@ using System.Diagnostics;
 using ADOFAI;
 using HarmonyLib;
 using UnityModManagerNet;
+using UnityEngine;
 
 namespace EditorTogether
 {
@@ -11,7 +12,10 @@ namespace EditorTogether
     {
         private readonly UnityModManager.ModEntry.ModLogger logger;
         private readonly WebSocketTransport transport;
+        private readonly RemotePresenceOverlay presenceOverlay = new RemotePresenceOverlay();
         private static readonly System.Reflection.FieldInfo SaveStateLastFrameField = AccessTools.Field(typeof(scnEditor), "saveStateLastFrame");
+        private readonly Dictionary<string, RemotePresenceState> remotePresence = new Dictionary<string, RemotePresenceState>();
+        private readonly List<int> lastPresenceFloors = new List<int>();
         private scnEditor lastEditor;
         private LevelData observedLevelData;
         private bool dirty;
@@ -20,6 +24,10 @@ namespace EditorTogether
         private const float DebounceDelay = 0.20f;
         private bool isHost;
         private string levelId = string.Empty;
+        private float presenceHeartbeatElapsed;
+        private float presenceCleanupElapsed;
+        private const float PresenceHeartbeatSeconds = 2f;
+        private const float PresenceTimeoutSeconds = 6f;
 
         private long updateCalls;
         private long updateTicks;
@@ -57,15 +65,23 @@ namespace EditorTogether
             await ConnectCoreAsync(AddRole(url, "client")).ConfigureAwait(false);
             TryFindEditor();
             if (lastEditor != null) ResetObservation(lastEditor);
+            ForcePresenceRefresh();
             logger.Log("[Collab] joined room; waiting for host snapshot");
         }
 
         public async System.Threading.Tasks.Task DisconnectAsync()
         {
             dirty = false; dirtyElapsed = 0f;
+            try
+            {
+                if (transport.IsConnected)
+                    await transport.SendPresenceAsync(levelId, Array.Empty<int>()).ConfigureAwait(false);
+            }
+            catch { }
             await transport.DisconnectAsync(isHost ? "Host disconnected" : "Client disconnected").ConfigureAwait(false);
             isHost = false; levelId = string.Empty; Revision = 0;
             lastEditor = null; observedLevelData = null; observedSaveStateFrame = int.MinValue;
+            ClearPresence();
             logger.Log("[Collab] disconnected");
         }
 
@@ -82,7 +98,7 @@ namespace EditorTogether
                 try { found = UnityEngine.Object.FindFirstObjectByType<scnEditor>(); }
                 catch { found = UnityEngine.Object.FindObjectOfType<scnEditor>(); }
                 if (found == null) return;
-                if (!ReferenceEquals(found, lastEditor)) { lastEditor = found; ResetObservation(found); }
+                if (!ReferenceEquals(found, lastEditor)) { lastEditor = found; ResetObservation(found); ForcePresenceRefresh(); }
             }
             finally { findEditorTicks += Stopwatch.GetTimestamp() - started; }
         }
@@ -98,6 +114,7 @@ namespace EditorTogether
                 observedLevelData = editor.levelData;
                 observedSaveStateFrame = ReadSaveStateLastFrame(editor);
                 dirty = false; dirtyElapsed = 0f;
+                ClearRemotePresenceOnly();
                 if (isHost) BeginNewLevel(editor, true);
                 return;
             }
@@ -119,6 +136,8 @@ namespace EditorTogether
             levelId = Guid.NewGuid().ToString("N");
             Revision = 0;
             ResetObservation(editor);
+            ClearRemotePresenceOnly();
+            ForcePresenceRefresh();
             logger.Log($"[Collab] host level changed; levelId={levelId}");
             if (publish) PublishSnapshot(editor, true);
         }
@@ -153,10 +172,12 @@ namespace EditorTogether
             diagnosticsElapsed += dt;
             try
             {
-                if (!transport.IsConnected) return;
+                if (!transport.IsConnected)
+                {
+                    if (remotePresence.Count != 0) ClearPresence();
+                    return;
+                }
 
-                // Do not rescan the whole Unity scene every frame once the editor is known.
-                // SaveState postfix also refreshes lastEditor if the editor instance changes.
                 if (lastEditor == null) TryFindEditor();
                 if (lastEditor == null) return;
 
@@ -164,6 +185,11 @@ namespace EditorTogether
                 while (transport.TryDequeue(out SnapshotMessage message)) newest = message;
                 if (newest != null) ApplyRemoteSnapshot(lastEditor, newest);
 
+                while (transport.TryDequeuePresence(out PresenceMessage presence))
+                    ApplyPresence(lastEditor, presence);
+
+                UpdateLocalPresence(lastEditor, dt);
+                CleanupPresence(dt);
                 ObserveEditor(lastEditor);
                 if (!dirty || IsApplyingRemote) return;
                 dirtyElapsed += dt;
@@ -179,6 +205,92 @@ namespace EditorTogether
             }
         }
 
+        private void UpdateLocalPresence(scnEditor editor, float dt)
+        {
+            var floors = new List<int>();
+            if (editor.selectedFloors != null)
+            {
+                for (int i = 0; i < editor.selectedFloors.Count; i++)
+                {
+                    scrFloor floor = editor.selectedFloors[i];
+                    if (floor != null) floors.Add(floor.seqID);
+                }
+            }
+            floors.Sort();
+
+            presenceHeartbeatElapsed += dt;
+            bool changed = floors.Count != lastPresenceFloors.Count;
+            if (!changed)
+            {
+                for (int i = 0; i < floors.Count; i++)
+                    if (floors[i] != lastPresenceFloors[i]) { changed = true; break; }
+            }
+
+            if (!changed && presenceHeartbeatElapsed < PresenceHeartbeatSeconds) return;
+            lastPresenceFloors.Clear();
+            lastPresenceFloors.AddRange(floors);
+            presenceHeartbeatElapsed = 0f;
+            _ = SendPresenceAsync(floors);
+        }
+
+        private async System.Threading.Tasks.Task SendPresenceAsync(IReadOnlyList<int> floors)
+        {
+            try { await transport.SendPresenceAsync(levelId, floors).ConfigureAwait(false); }
+            catch (Exception ex) { logger.Error("[Collab] presence send failed: " + ex.Message); }
+        }
+
+        private void ApplyPresence(scnEditor editor, PresenceMessage message)
+        {
+            if (message == null || string.IsNullOrEmpty(message.ClientId)) return;
+            if (string.IsNullOrEmpty(levelId) || message.LevelId != levelId) return;
+
+            if (message.SelectedFloors.Length == 0)
+            {
+                remotePresence.Remove(message.ClientId);
+                presenceOverlay.Clear(message.ClientId);
+                return;
+            }
+
+            remotePresence[message.ClientId] = new RemotePresenceState(message.SelectedFloors, Time.realtimeSinceStartup);
+            presenceOverlay.Show(editor, message.ClientId, message.SelectedFloors);
+        }
+
+        private void CleanupPresence(float dt)
+        {
+            presenceCleanupElapsed += dt;
+            if (presenceCleanupElapsed < 1f) return;
+            presenceCleanupElapsed = 0f;
+            float now = Time.realtimeSinceStartup;
+            var stale = new List<string>();
+            foreach (var pair in remotePresence)
+                if (now - pair.Value.LastSeen > PresenceTimeoutSeconds) stale.Add(pair.Key);
+            for (int i = 0; i < stale.Count; i++)
+            {
+                remotePresence.Remove(stale[i]);
+                presenceOverlay.Clear(stale[i]);
+            }
+        }
+
+        private void ForcePresenceRefresh()
+        {
+            lastPresenceFloors.Clear();
+            presenceHeartbeatElapsed = PresenceHeartbeatSeconds;
+        }
+
+        private void ClearRemotePresenceOnly()
+        {
+            remotePresence.Clear();
+            presenceOverlay.ClearAll();
+        }
+
+        private void ClearPresence()
+        {
+            ClearRemotePresenceOnly();
+            lastPresenceFloors.Clear();
+            presenceHeartbeatElapsed = 0f;
+            presenceCleanupElapsed = 0f;
+        }
+
         private void FlushDiagnostics()
         {
             double tickMs = 1000.0 / Stopwatch.Frequency;
@@ -187,7 +299,7 @@ namespace EditorTogether
                        $"update={updateCalls} calls/{updateTicks * tickMs:F2}ms " +
                        $"findEditor={findEditorCalls} calls/{findEditorTicks * tickMs:F2}ms " +
                        $"SaveState={saveStateCalls} publish={publishCalls}/{publishTicks * tickMs:F2}ms " +
-                       $"apply={appliedSnapshots} managedMem={memory / (1024.0 * 1024.0):F1}MiB");
+                       $"apply={appliedSnapshots} peers={remotePresence.Count} managedMem={memory / (1024.0 * 1024.0):F1}MiB");
             diagnosticsElapsed = 0f;
             updateCalls = updateTicks = findEditorCalls = findEditorTicks = saveStateCalls = publishCalls = publishTicks = appliedSnapshots = 0;
         }
@@ -200,6 +312,7 @@ namespace EditorTogether
                 return;
             }
 
+            if (snapshot.IsLevelSwitch) ClearRemotePresenceOnly();
             appliedSnapshots++;
             ApplyRemote(() =>
             {
@@ -211,12 +324,19 @@ namespace EditorTogether
                 AccessTools.Method(typeof(scnEditor), "UpdateDecorationObjects")?.Invoke(editor, null);
                 levelId = snapshot.LevelId;
                 Revision = snapshot.IsLevelSwitch ? snapshot.Revision : Math.Max(Revision, snapshot.Revision);
-                dirty = false; dirtyElapsed = 0f; ResetObservation(editor);
+                dirty = false; dirtyElapsed = 0f; ResetObservation(editor); ForcePresenceRefresh();
                 logger.Log($"[Collab] applied {(snapshot.IsLevelSwitch ? "level switch" : "snapshot")}; level={levelId}, revision={snapshot.Revision}, from={snapshot.ClientId}, loadResult={loadResult}");
             });
         }
 
         public void ApplyRemote(Action apply) { if (apply == null) throw new ArgumentNullException(nameof(apply)); IsApplyingRemote = true; try { apply(); } catch (Exception ex) { logger.Error($"[Collab] remote apply failed: {ex}"); } finally { IsApplyingRemote = false; } }
-        public void Dispose() { transport.Dispose(); }
+        public void Dispose() { presenceOverlay.Dispose(); transport.Dispose(); }
+
+        private sealed class RemotePresenceState
+        {
+            public int[] Floors { get; }
+            public float LastSeen { get; }
+            public RemotePresenceState(int[] floors, float lastSeen) { Floors = floors ?? Array.Empty<int>(); LastSeen = lastSeen; }
+        }
     }
 }
