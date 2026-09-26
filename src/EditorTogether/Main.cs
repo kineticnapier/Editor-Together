@@ -13,6 +13,7 @@ namespace EditorTogether
         internal static bool Enabled { get; private set; } = true;
         private static string serverUrl = "ws://127.0.0.1:38241/ws";
         private static string room = "default";
+        private static string displayName = string.IsNullOrWhiteSpace(Environment.UserName) ? "Player" : Environment.UserName;
         private static bool connecting;
         private static string status = "Disconnected";
 
@@ -20,6 +21,7 @@ namespace EditorTogether
         {
             ModEntry = modEntry;
             Controller = new CollaborationController(modEntry.Logger);
+            Controller.SetDisplayName(displayName);
             Harmony = new Harmony(modEntry.Info.Id);
             Harmony.PatchAll(typeof(Main).Assembly);
             Enabled = true;
@@ -71,6 +73,14 @@ namespace EditorTogether
         private static void OnGUI(UnityModManager.ModEntry modEntry)
         {
             GUILayout.Label("Editor Together"); GUILayout.Space(4f);
+            GUILayout.BeginHorizontal(); GUILayout.Label("Name", GUILayout.Width(80f));
+            string nextName = GUILayout.TextField(displayName, GUILayout.Width(220f));
+            GUILayout.EndHorizontal();
+            if (!string.Equals(nextName, displayName, StringComparison.Ordinal))
+            {
+                displayName = nextName;
+                Controller?.SetDisplayName(displayName);
+            }
             GUILayout.BeginHorizontal(); GUILayout.Label("Server", GUILayout.Width(80f)); serverUrl = GUILayout.TextField(serverUrl, GUILayout.MinWidth(360f)); GUILayout.EndHorizontal();
             GUILayout.BeginHorizontal(); GUILayout.Label("Room", GUILayout.Width(80f)); room = GUILayout.TextField(room, GUILayout.Width(220f)); GUILayout.EndHorizontal();
             GUILayout.Space(6f);
@@ -83,7 +93,7 @@ namespace EditorTogether
             GUILayout.EndHorizontal(); GUI.enabled = true;
             GUILayout.Space(6f); GUILayout.Label("Status: " + status);
             if (Controller != null) { GUILayout.Label("Client: " + Controller.ClientId); GUILayout.Label("Revision: " + Controller.Revision); GUILayout.Label("Level: " + Controller.LevelId); }
-            GUILayout.Space(4f); GUILayout.Label("Remote selected tiles are shown as colored outlines.");
+            GUILayout.Space(4f); GUILayout.Label("Remote selected tiles are shown as colored outlines with player names.");
             GUILayout.Label("Host level changes are broadcast to everyone. Host disconnect closes the room.");
         }
 
@@ -93,6 +103,7 @@ namespace EditorTogether
             connecting = true; status = createRoom ? "Creating room..." : "Joining room...";
             try
             {
+                Controller.SetDisplayName(displayName);
                 string url = BuildRoomUrl(serverUrl, room);
                 if (createRoom) await Controller.CreateRoomAsync(url).ConfigureAwait(false); else await Controller.JoinRoomAsync(url).ConfigureAwait(false);
                 status = Controller.IsConnected ? (createRoom ? "Connected (Host)" : "Connected (Joined)") : "Connection failed (see log)";
