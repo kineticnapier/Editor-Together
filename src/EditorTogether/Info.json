@@ -2,7 +2,7 @@
   "Id": "EditorTogether",
   "DisplayName": "Editor Together",
   "Author": "kineticnapier",
-  "Version": "0.0.6",
+  "Version": "0.0.7",
   "ManagerVersion": "0.27.10",
   "AssemblyName": "EditorTogether.dll",
   "EntryMethod": "EditorTogether.Main.Load"
