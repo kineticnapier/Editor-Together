@@ -67,7 +67,6 @@ namespace EditorTogether
             string text = string.IsNullOrWhiteSpace(displayName) ? ShortId(clientId) : displayName.Trim();
             if (text.Length > 32) text = text.Substring(0, 32);
 
-            // A small dark shadow keeps the label readable over bright decorations.
             var shadowGo = new GameObject("EditorTogether Remote Name Shadow " + ShortId(clientId));
             shadowGo.hideFlags = HideFlags.DontSave;
             shadowGo.transform.SetParent(parent, false);
@@ -119,7 +118,7 @@ namespace EditorTogether
             return id.Length <= 6 ? id : id.Substring(0, 6);
         }
 
-        private static Color ColorForClient(string id)
+        internal static Color ColorForClient(string id)
         {
             unchecked
             {
