@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using ADOFAI;
 using HarmonyLib;
 using UnityModManagerNet;
@@ -19,6 +20,16 @@ namespace EditorTogether
         private const float DebounceDelay = 0.20f;
         private bool isHost;
         private string levelId = string.Empty;
+
+        private long updateCalls;
+        private long updateTicks;
+        private long findEditorCalls;
+        private long findEditorTicks;
+        private long saveStateCalls;
+        private long publishCalls;
+        private long publishTicks;
+        private long appliedSnapshots;
+        private float diagnosticsElapsed;
 
         public bool IsApplyingRemote { get; private set; }
         public long Revision { get; private set; }
@@ -63,11 +74,17 @@ namespace EditorTogether
 
         private void TryFindEditor()
         {
-            scnEditor found;
-            try { found = UnityEngine.Object.FindFirstObjectByType<scnEditor>(); }
-            catch { found = UnityEngine.Object.FindObjectOfType<scnEditor>(); }
-            if (found == null) return;
-            if (!ReferenceEquals(found, lastEditor)) { lastEditor = found; ResetObservation(found); }
+            long started = Stopwatch.GetTimestamp();
+            findEditorCalls++;
+            try
+            {
+                scnEditor found;
+                try { found = UnityEngine.Object.FindFirstObjectByType<scnEditor>(); }
+                catch { found = UnityEngine.Object.FindObjectOfType<scnEditor>(); }
+                if (found == null) return;
+                if (!ReferenceEquals(found, lastEditor)) { lastEditor = found; ResetObservation(found); }
+            }
+            finally { findEditorTicks += Stopwatch.GetTimestamp() - started; }
         }
 
         private static int ReadSaveStateLastFrame(scnEditor editor) => editor == null || SaveStateLastFrameField == null ? int.MinValue : (int)SaveStateLastFrameField.GetValue(editor);
@@ -76,9 +93,6 @@ namespace EditorTogether
         private void ObserveEditor(scnEditor editor)
         {
             if (!transport.IsConnected || IsApplyingRemote) return;
-
-            // Opening another chart replaces the LevelData object. Only the host is allowed
-            // to turn that into a room-wide level switch.
             if (!ReferenceEquals(observedLevelData, editor.levelData))
             {
                 observedLevelData = editor.levelData;
@@ -94,7 +108,11 @@ namespace EditorTogether
             dirty = true; dirtyElapsed = 0f;
         }
 
-        public void OnEditorStateSaved(scnEditor editor) { if (editor != null) lastEditor = editor; }
+        public void OnEditorStateSaved(scnEditor editor)
+        {
+            saveStateCalls++;
+            if (editor != null) lastEditor = editor;
+        }
 
         private void BeginNewLevel(scnEditor editor, bool publish)
         {
@@ -107,12 +125,18 @@ namespace EditorTogether
 
         private void PublishSnapshot(scnEditor editor, bool levelSwitch = false)
         {
-            if (!transport.IsConnected) return;
-            if (string.IsNullOrEmpty(levelId)) levelId = Guid.NewGuid().ToString("N");
-            string encodedLevel = editor.levelData.Encode();
-            Revision++;
-            logger.Log($"[Collab] {(levelSwitch ? "level switch" : "snapshot")} published; level={levelId}, revision={Revision}, bytes={encodedLevel.Length}");
-            _ = SendSnapshotAsync(Revision, levelId, encodedLevel, levelSwitch);
+            long started = Stopwatch.GetTimestamp();
+            publishCalls++;
+            try
+            {
+                if (!transport.IsConnected) return;
+                if (string.IsNullOrEmpty(levelId)) levelId = Guid.NewGuid().ToString("N");
+                string encodedLevel = editor.levelData.Encode();
+                Revision++;
+                logger.Log($"[Collab] {(levelSwitch ? "level switch" : "snapshot")} published; level={levelId}, revision={Revision}, bytes={encodedLevel.Length}");
+                _ = SendSnapshotAsync(Revision, levelId, encodedLevel, levelSwitch);
+            }
+            finally { publishTicks += Stopwatch.GetTimestamp() - started; }
         }
 
         private async System.Threading.Tasks.Task SendSnapshotAsync(long revision, string id, string encodedLevel, bool levelSwitch)
@@ -123,35 +147,60 @@ namespace EditorTogether
 
         public void Update(float deltaTime = 0f)
         {
-            // There is nothing to observe while disconnected. In particular, do not call
-            // FindFirstObjectByType/FindObjectOfType every frame: on large editor scenes that
-            // scan is expensive and was the source of the persistent editor slowdown.
-            if (!transport.IsConnected) return;
+            long started = Stopwatch.GetTimestamp();
+            updateCalls++;
+            float dt = deltaTime > 0f ? deltaTime : UnityEngine.Time.unscaledDeltaTime;
+            diagnosticsElapsed += dt;
+            try
+            {
+                if (!transport.IsConnected) return;
 
-            TryFindEditor();
-            if (lastEditor == null) return;
-            SnapshotMessage newest = null;
-            while (transport.TryDequeue(out SnapshotMessage message)) newest = message;
-            if (newest != null) ApplyRemoteSnapshot(lastEditor, newest);
+                // Do not rescan the whole Unity scene every frame once the editor is known.
+                // SaveState postfix also refreshes lastEditor if the editor instance changes.
+                if (lastEditor == null) TryFindEditor();
+                if (lastEditor == null) return;
 
-            ObserveEditor(lastEditor);
-            if (!dirty || IsApplyingRemote) return;
-            dirtyElapsed += deltaTime > 0f ? deltaTime : UnityEngine.Time.unscaledDeltaTime;
-            if (dirtyElapsed < DebounceDelay) return;
-            dirty = false; dirtyElapsed = 0f;
-            try { logger.Log("[Collab] editor mutation settled; publishing snapshot"); PublishSnapshot(lastEditor); }
-            catch (Exception ex) { logger.Error("[Collab] live snapshot failed: " + ex.Message); }
+                SnapshotMessage newest = null;
+                while (transport.TryDequeue(out SnapshotMessage message)) newest = message;
+                if (newest != null) ApplyRemoteSnapshot(lastEditor, newest);
+
+                ObserveEditor(lastEditor);
+                if (!dirty || IsApplyingRemote) return;
+                dirtyElapsed += dt;
+                if (dirtyElapsed < DebounceDelay) return;
+                dirty = false; dirtyElapsed = 0f;
+                try { logger.Log("[Collab] editor mutation settled; publishing snapshot"); PublishSnapshot(lastEditor); }
+                catch (Exception ex) { logger.Error("[Collab] live snapshot failed: " + ex.Message); }
+            }
+            finally
+            {
+                updateTicks += Stopwatch.GetTimestamp() - started;
+                if (diagnosticsElapsed >= 5f) FlushDiagnostics();
+            }
+        }
+
+        private void FlushDiagnostics()
+        {
+            double tickMs = 1000.0 / Stopwatch.Frequency;
+            long memory = GC.GetTotalMemory(false);
+            logger.Log($"[CollabPerf] connected={transport.IsConnected} enabled={Main.Enabled} window={diagnosticsElapsed:F1}s " +
+                       $"update={updateCalls} calls/{updateTicks * tickMs:F2}ms " +
+                       $"findEditor={findEditorCalls} calls/{findEditorTicks * tickMs:F2}ms " +
+                       $"SaveState={saveStateCalls} publish={publishCalls}/{publishTicks * tickMs:F2}ms " +
+                       $"apply={appliedSnapshots} managedMem={memory / (1024.0 * 1024.0):F1}MiB");
+            diagnosticsElapsed = 0f;
+            updateCalls = updateTicks = findEditorCalls = findEditorTicks = saveStateCalls = publishCalls = publishTicks = appliedSnapshots = 0;
         }
 
         private void ApplyRemoteSnapshot(scnEditor editor, SnapshotMessage snapshot)
         {
-            // A packet from an old chart generation must never overwrite the current chart.
             if (!snapshot.IsLevelSwitch && !string.IsNullOrEmpty(levelId) && snapshot.LevelId != levelId)
             {
                 logger.Log($"[Collab] ignored stale snapshot for level={snapshot.LevelId}");
                 return;
             }
 
+            appliedSnapshots++;
             ApplyRemote(() =>
             {
                 var dictionary = RuntimeJson.Deserialize(snapshot.LevelData) as Dictionary<string, object>;
