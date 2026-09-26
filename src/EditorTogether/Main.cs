@@ -49,8 +49,6 @@ namespace EditorTogether
             }
             else
             {
-                // Stop all per-frame collaboration work immediately. Disconnect can finish
-                // asynchronously; OnUpdate is already gated by Enabled.
                 connecting = false;
                 status = "Disabled";
                 if (Controller != null && Controller.IsConnected)
@@ -66,6 +64,8 @@ namespace EditorTogether
         {
             if (!Enabled) return;
             Controller?.Update(deltaTime);
+            if (!connecting && Controller != null && !Controller.IsConnected && status.StartsWith("Connected", StringComparison.Ordinal))
+                status = "Disconnected";
         }
 
         private static void OnGUI(UnityModManager.ModEntry modEntry)
@@ -83,7 +83,8 @@ namespace EditorTogether
             GUILayout.EndHorizontal(); GUI.enabled = true;
             GUILayout.Space(6f); GUILayout.Label("Status: " + status);
             if (Controller != null) { GUILayout.Label("Client: " + Controller.ClientId); GUILayout.Label("Revision: " + Controller.Revision); GUILayout.Label("Level: " + Controller.LevelId); }
-            GUILayout.Space(4f); GUILayout.Label("Host level changes are broadcast to everyone. Host disconnect closes the room.");
+            GUILayout.Space(4f); GUILayout.Label("Remote selected tiles are shown as colored outlines.");
+            GUILayout.Label("Host level changes are broadcast to everyone. Host disconnect closes the room.");
         }
 
         private static async System.Threading.Tasks.Task ConnectFromUiAsync(bool createRoom)
