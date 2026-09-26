@@ -61,6 +61,27 @@ namespace EditorTogether
             ForcePresenceRefresh();
         }
 
+        public IReadOnlyList<ParticipantInfo> GetParticipants()
+        {
+            var result = new List<ParticipantInfo>();
+            if (transport.IsConnected)
+                result.Add(new ParticipantInfo(transport.ClientId, displayName, isHost, true));
+
+            foreach (var pair in remotePresence)
+            {
+                RemotePresenceState state = pair.Value;
+                result.Add(new ParticipantInfo(pair.Key, state.DisplayName, state.IsHost, false));
+            }
+
+            result.Sort((a, b) =>
+            {
+                if (a.IsHost != b.IsHost) return a.IsHost ? -1 : 1;
+                if (a.IsLocal != b.IsLocal) return a.IsLocal ? -1 : 1;
+                return string.Compare(a.DisplayName, b.DisplayName, StringComparison.OrdinalIgnoreCase);
+            });
+            return result;
+        }
+
         public async System.Threading.Tasks.Task CreateRoomAsync(string url)
         {
             isHost = true;
@@ -88,7 +109,7 @@ namespace EditorTogether
             try
             {
                 if (transport.IsConnected)
-                    await transport.SendPresenceAsync(levelId, displayName, Array.Empty<int>()).ConfigureAwait(false);
+                    await transport.SendPresenceAsync(levelId, displayName, isHost, true, Array.Empty<int>()).ConfigureAwait(false);
             }
             catch { }
             await transport.DisconnectAsync(isHost ? "Host disconnected" : "Client disconnected").ConfigureAwait(false);
@@ -139,7 +160,7 @@ namespace EditorTogether
                 observedLevelPath = currentLevelPath;
                 observedSaveStateFrame = ReadSaveStateLastFrame(editor);
                 dirty = false; dirtyElapsed = 0f;
-                ClearRemotePresenceOnly();
+                ClearRemoteSelections();
                 if (isHost)
                 {
                     logger.Log($"[Collab] detected host chart switch: '{oldPath}' -> '{currentLevelPath}'");
@@ -165,7 +186,7 @@ namespace EditorTogether
             levelId = Guid.NewGuid().ToString("N");
             Revision = 0;
             ResetObservation(editor);
-            ClearRemotePresenceOnly();
+            ClearRemoteSelections();
             ForcePresenceRefresh();
             logger.Log($"[Collab] host level changed; levelId={levelId}");
             if (publish) PublishSnapshot(editor, true);
@@ -264,24 +285,34 @@ namespace EditorTogether
 
         private async System.Threading.Tasks.Task SendPresenceAsync(IReadOnlyList<int> floors)
         {
-            try { await transport.SendPresenceAsync(levelId, displayName, floors).ConfigureAwait(false); }
+            try { await transport.SendPresenceAsync(levelId, displayName, isHost, false, floors).ConfigureAwait(false); }
             catch (Exception ex) { logger.Error("[Collab] presence send failed: " + ex.Message); }
         }
 
         private void ApplyPresence(scnEditor editor, PresenceMessage message)
         {
             if (message == null || string.IsNullOrEmpty(message.ClientId)) return;
-            if (string.IsNullOrEmpty(levelId) || message.LevelId != levelId) return;
 
-            if (message.SelectedFloors.Length == 0)
+            if (message.IsLeaving)
             {
                 remotePresence.Remove(message.ClientId);
                 presenceOverlay.Clear(message.ClientId);
                 return;
             }
 
-            remotePresence[message.ClientId] = new RemotePresenceState(message.SelectedFloors, Time.realtimeSinceStartup);
-            presenceOverlay.Show(editor, message.ClientId, message.DisplayName, message.SelectedFloors);
+            string name = (message.DisplayName ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(name)) name = message.ClientId.Length > 6 ? message.ClientId.Substring(0, 6) : message.ClientId;
+            remotePresence[message.ClientId] = new RemotePresenceState(name, message.IsHost, message.SelectedFloors, Time.realtimeSinceStartup);
+
+            // Participant presence is room-wide, while selection overlays only make sense
+            // when both peers are looking at the same chart generation.
+            if (string.IsNullOrEmpty(levelId) || message.LevelId != levelId || message.SelectedFloors.Length == 0)
+            {
+                presenceOverlay.Clear(message.ClientId);
+                return;
+            }
+
+            presenceOverlay.Show(editor, message.ClientId, name, message.SelectedFloors);
         }
 
         private void CleanupPresence(float dt)
@@ -306,15 +337,15 @@ namespace EditorTogether
             presenceHeartbeatElapsed = PresenceHeartbeatSeconds;
         }
 
-        private void ClearRemotePresenceOnly()
+        private void ClearRemoteSelections()
         {
-            remotePresence.Clear();
             presenceOverlay.ClearAll();
         }
 
         private void ClearPresence()
         {
-            ClearRemotePresenceOnly();
+            remotePresence.Clear();
+            presenceOverlay.ClearAll();
             lastPresenceFloors.Clear();
             presenceHeartbeatElapsed = 0f;
             presenceCleanupElapsed = 0f;
@@ -341,7 +372,7 @@ namespace EditorTogether
                 return;
             }
 
-            if (snapshot.IsLevelSwitch) ClearRemotePresenceOnly();
+            if (snapshot.IsLevelSwitch) ClearRemoteSelections();
             appliedSnapshots++;
             ApplyRemote(() =>
             {
@@ -363,9 +394,33 @@ namespace EditorTogether
 
         private sealed class RemotePresenceState
         {
+            public string DisplayName { get; }
+            public bool IsHost { get; }
             public int[] Floors { get; }
             public float LastSeen { get; }
-            public RemotePresenceState(int[] floors, float lastSeen) { Floors = floors ?? Array.Empty<int>(); LastSeen = lastSeen; }
+            public RemotePresenceState(string displayName, bool isHost, int[] floors, float lastSeen)
+            {
+                DisplayName = displayName ?? string.Empty;
+                IsHost = isHost;
+                Floors = floors ?? Array.Empty<int>();
+                LastSeen = lastSeen;
+            }
+        }
+    }
+
+    internal sealed class ParticipantInfo
+    {
+        public string ClientId { get; }
+        public string DisplayName { get; }
+        public bool IsHost { get; }
+        public bool IsLocal { get; }
+
+        public ParticipantInfo(string clientId, string displayName, bool isHost, bool isLocal)
+        {
+            ClientId = clientId ?? string.Empty;
+            DisplayName = string.IsNullOrWhiteSpace(displayName) ? "Player" : displayName;
+            IsHost = isHost;
+            IsLocal = isLocal;
         }
     }
 }
