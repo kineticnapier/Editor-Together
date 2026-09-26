@@ -54,6 +54,7 @@ namespace EditorTogether
             dirty = false; dirtyElapsed = 0f;
             await transport.DisconnectAsync(isHost ? "Host disconnected" : "Client disconnected").ConfigureAwait(false);
             isHost = false; levelId = string.Empty; Revision = 0;
+            lastEditor = null; observedLevelData = null; observedSaveStateFrame = int.MinValue;
             logger.Log("[Collab] disconnected");
         }
 
@@ -122,6 +123,11 @@ namespace EditorTogether
 
         public void Update(float deltaTime = 0f)
         {
+            // There is nothing to observe while disconnected. In particular, do not call
+            // FindFirstObjectByType/FindObjectOfType every frame: on large editor scenes that
+            // scan is expensive and was the source of the persistent editor slowdown.
+            if (!transport.IsConnected) return;
+
             TryFindEditor();
             if (lastEditor == null) return;
             SnapshotMessage newest = null;
@@ -129,7 +135,7 @@ namespace EditorTogether
             if (newest != null) ApplyRemoteSnapshot(lastEditor, newest);
 
             ObserveEditor(lastEditor);
-            if (!dirty || !transport.IsConnected || IsApplyingRemote) return;
+            if (!dirty || IsApplyingRemote) return;
             dirtyElapsed += deltaTime > 0f ? deltaTime : UnityEngine.Time.unscaledDeltaTime;
             if (dirtyElapsed < DebounceDelay) return;
             dirty = false; dirtyElapsed = 0f;

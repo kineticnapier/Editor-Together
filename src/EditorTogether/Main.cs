@@ -10,6 +10,7 @@ namespace EditorTogether
         internal static UnityModManager.ModEntry ModEntry;
         internal static Harmony Harmony;
         internal static CollaborationController Controller;
+        internal static bool Enabled { get; private set; } = true;
         private static string serverUrl = "ws://127.0.0.1:38241/ws";
         private static string room = "default";
         private static bool connecting;
@@ -17,15 +18,55 @@ namespace EditorTogether
 
         public static bool Load(UnityModManager.ModEntry modEntry)
         {
-            ModEntry = modEntry; Controller = new CollaborationController(modEntry.Logger);
-            Harmony = new Harmony(modEntry.Info.Id); Harmony.PatchAll(typeof(Main).Assembly);
+            ModEntry = modEntry;
+            Controller = new CollaborationController(modEntry.Logger);
+            Harmony = new Harmony(modEntry.Info.Id);
+            Harmony.PatchAll(typeof(Main).Assembly);
+            Enabled = true;
+
             string overrideUrl = Environment.GetEnvironmentVariable("EDITORCOLLAB_URL");
             if (!string.IsNullOrWhiteSpace(overrideUrl)) SplitUrlAndRoom(overrideUrl);
-            modEntry.OnUpdate = OnUpdate; modEntry.OnGUI = OnGUI; modEntry.OnUnload = Unload;
-            modEntry.Logger.Log("EditorTogether prototype loaded."); return true;
+
+            modEntry.OnToggle = OnToggle;
+            modEntry.OnUpdate = OnUpdate;
+            modEntry.OnGUI = OnGUI;
+            modEntry.OnUnload = Unload;
+            modEntry.Logger.Log("EditorTogether prototype loaded.");
+            return true;
         }
 
-        private static void OnUpdate(UnityModManager.ModEntry modEntry, float deltaTime) { Controller?.Update(deltaTime); }
+        private static bool OnToggle(UnityModManager.ModEntry modEntry, bool value)
+        {
+            if (Enabled == value) return true;
+            Enabled = value;
+
+            if (value)
+            {
+                Harmony = new Harmony(modEntry.Info.Id);
+                Harmony.PatchAll(typeof(Main).Assembly);
+                status = "Disconnected";
+                modEntry.Logger.Log("[Collab] enabled");
+            }
+            else
+            {
+                // Stop all per-frame collaboration work immediately. Disconnect can finish
+                // asynchronously; OnUpdate is already gated by Enabled.
+                connecting = false;
+                status = "Disabled";
+                if (Controller != null && Controller.IsConnected)
+                    _ = Controller.DisconnectAsync();
+                Harmony?.UnpatchAll(modEntry.Info.Id);
+                modEntry.Logger.Log("[Collab] disabled; patches removed");
+            }
+
+            return true;
+        }
+
+        private static void OnUpdate(UnityModManager.ModEntry modEntry, float deltaTime)
+        {
+            if (!Enabled) return;
+            Controller?.Update(deltaTime);
+        }
 
         private static void OnGUI(UnityModManager.ModEntry modEntry)
         {
@@ -47,7 +88,7 @@ namespace EditorTogether
 
         private static async System.Threading.Tasks.Task ConnectFromUiAsync(bool createRoom)
         {
-            if (Controller == null || connecting) return;
+            if (!Enabled || Controller == null || connecting) return;
             connecting = true; status = createRoom ? "Creating room..." : "Joining room...";
             try
             {
@@ -83,6 +124,12 @@ namespace EditorTogether
             foreach (string part in queryText.Split('&')) { string[] pair = part.Split(new[] { '=' }, 2); if (pair.Length == 2 && string.Equals(pair[0], "room", StringComparison.OrdinalIgnoreCase)) room = Uri.UnescapeDataString(pair[1]); }
         }
 
-        private static bool Unload(UnityModManager.ModEntry modEntry) { Controller?.Dispose(); Harmony?.UnpatchAll(modEntry.Info.Id); return true; }
+        private static bool Unload(UnityModManager.ModEntry modEntry)
+        {
+            Enabled = false;
+            Controller?.Dispose();
+            Harmony?.UnpatchAll(modEntry.Info.Id);
+            return true;
+        }
     }
 }
