@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net.WebSockets;
+using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
 var app = builder.Build();
@@ -44,8 +45,20 @@ app.Map("/ws", async context =>
             do { result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), context.RequestAborted); if (result.MessageType == WebSocketMessageType.Close) break; await message.WriteAsync(buffer.AsMemory(0, result.Count), context.RequestAborted); } while (!result.EndOfMessage);
             if (result.MessageType == WebSocketMessageType.Close) break;
             if (result.MessageType != WebSocketMessageType.Text) continue;
-            var payload = message.ToArray(); lock (room.Sync) room.LatestSnapshot = payload;
-            Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] > {connectionId:N} room={roomName} bytes={payload.Length}");
+            var payload = message.ToArray();
+
+            string type = "";
+            try
+            {
+                using var json = JsonDocument.Parse(payload);
+                if (json.RootElement.TryGetProperty("type", out var typeElement)) type = typeElement.GetString() ?? "";
+            }
+            catch { }
+
+            if (type is "snapshot" or "level-switch")
+                lock (room.Sync) room.LatestSnapshot = payload;
+
+            Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] > {connectionId:N} room={roomName} type={type} bytes={payload.Length}");
             foreach (var peer in room.Clients.ToArray())
             {
                 if (peer.Key == connectionId || peer.Value.State != WebSocketState.Open) continue;
