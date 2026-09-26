@@ -92,9 +92,41 @@ namespace EditorTogether
             if (GUILayout.Button("Disconnect", GUILayout.Width(130f))) _ = DisconnectFromUiAsync();
             GUILayout.EndHorizontal(); GUI.enabled = true;
             GUILayout.Space(6f); GUILayout.Label("Status: " + status);
-            if (Controller != null) { GUILayout.Label("Client: " + Controller.ClientId); GUILayout.Label("Revision: " + Controller.Revision); GUILayout.Label("Level: " + Controller.LevelId); }
+            if (Controller != null)
+            {
+                GUILayout.Label("Client: " + ShortId(Controller.ClientId));
+                GUILayout.Label("Revision: " + Controller.Revision);
+                GUILayout.Label("Level: " + Controller.LevelId);
+
+                if (Controller.IsConnected)
+                {
+                    var participants = Controller.GetParticipants();
+                    GUILayout.Space(6f);
+                    GUILayout.Label("Participants (" + participants.Count + ")");
+                    for (int i = 0; i < participants.Count; i++)
+                    {
+                        ParticipantInfo participant = participants[i];
+                        GUILayout.BeginHorizontal();
+                        Color oldColor = GUI.contentColor;
+                        GUI.contentColor = RemotePresenceOverlay.ColorForClient(participant.ClientId);
+                        GUILayout.Label("●", GUILayout.Width(18f));
+                        GUI.contentColor = oldColor;
+
+                        string suffix = participant.IsLocal ? " (You)" : string.Empty;
+                        if (participant.IsHost) suffix += " [Host]";
+                        GUILayout.Label(participant.DisplayName + suffix);
+                        GUILayout.EndHorizontal();
+                    }
+                }
+            }
             GUILayout.Space(4f); GUILayout.Label("Remote selected tiles are shown as colored outlines with player names.");
             GUILayout.Label("Host level changes are broadcast to everyone. Host disconnect closes the room.");
+        }
+
+        private static string ShortId(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return "-";
+            return id.Length <= 8 ? id : id.Substring(0, 8) + "...";
         }
 
         private static async System.Threading.Tasks.Task ConnectFromUiAsync(bool createRoom)
