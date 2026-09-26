@@ -25,6 +25,7 @@ namespace EditorTogether
         private const float DebounceDelay = 0.20f;
         private bool isHost;
         private string levelId = string.Empty;
+        private string displayName = "Player";
         private float presenceHeartbeatElapsed;
         private float presenceCleanupElapsed;
         private const float PresenceHeartbeatSeconds = 2f;
@@ -46,8 +47,19 @@ namespace EditorTogether
         public bool IsHost => isHost;
         public string ClientId => transport.ClientId;
         public string LevelId => levelId;
+        public string DisplayName => displayName;
 
         public CollaborationController(UnityModManager.ModEntry.ModLogger logger) { this.logger = logger; transport = new WebSocketTransport(logger); }
+
+        public void SetDisplayName(string value)
+        {
+            string next = (value ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim();
+            if (string.IsNullOrEmpty(next)) next = "Player";
+            if (next.Length > 32) next = next.Substring(0, 32);
+            if (string.Equals(displayName, next, StringComparison.Ordinal)) return;
+            displayName = next;
+            ForcePresenceRefresh();
+        }
 
         public async System.Threading.Tasks.Task CreateRoomAsync(string url)
         {
@@ -76,7 +88,7 @@ namespace EditorTogether
             try
             {
                 if (transport.IsConnected)
-                    await transport.SendPresenceAsync(levelId, Array.Empty<int>()).ConfigureAwait(false);
+                    await transport.SendPresenceAsync(levelId, displayName, Array.Empty<int>()).ConfigureAwait(false);
             }
             catch { }
             await transport.DisconnectAsync(isHost ? "Host disconnected" : "Client disconnected").ConfigureAwait(false);
@@ -117,9 +129,6 @@ namespace EditorTogether
         {
             if (!transport.IsConnected || IsApplyingRemote) return;
 
-            // LoadLevel mutates the existing LevelData in-place on current ADOFAI builds,
-            // so object identity alone does not reliably reveal that another chart was opened.
-            // ADOBase.levelPath changes as part of OpenLevelCo and is cheap to inspect every frame.
             string currentLevelPath = ReadLevelPath();
             bool levelPathChanged = !string.Equals(observedLevelPath, currentLevelPath, StringComparison.OrdinalIgnoreCase);
             bool levelDataChanged = !ReferenceEquals(observedLevelData, editor.levelData);
@@ -255,7 +264,7 @@ namespace EditorTogether
 
         private async System.Threading.Tasks.Task SendPresenceAsync(IReadOnlyList<int> floors)
         {
-            try { await transport.SendPresenceAsync(levelId, floors).ConfigureAwait(false); }
+            try { await transport.SendPresenceAsync(levelId, displayName, floors).ConfigureAwait(false); }
             catch (Exception ex) { logger.Error("[Collab] presence send failed: " + ex.Message); }
         }
 
@@ -272,7 +281,7 @@ namespace EditorTogether
             }
 
             remotePresence[message.ClientId] = new RemotePresenceState(message.SelectedFloors, Time.realtimeSinceStartup);
-            presenceOverlay.Show(editor, message.ClientId, message.SelectedFloors);
+            presenceOverlay.Show(editor, message.ClientId, message.DisplayName, message.SelectedFloors);
         }
 
         private void CleanupPresence(float dt)
