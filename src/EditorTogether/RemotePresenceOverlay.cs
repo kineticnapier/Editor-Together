@@ -9,7 +9,7 @@ namespace EditorTogether
         private readonly Dictionary<string, List<GameObject>> objects = new Dictionary<string, List<GameObject>>();
         private Material material;
 
-        public void Show(scnEditor editor, string clientId, IReadOnlyList<int> floorIds)
+        public void Show(scnEditor editor, string clientId, string displayName, IReadOnlyList<int> floorIds)
         {
             Clear(clientId);
             if (editor == null || editor.floors == null || floorIds == null || floorIds.Count == 0) return;
@@ -22,13 +22,15 @@ namespace EditorTogether
             }
 
             Color color = ColorForClient(clientId);
-            var list = new List<GameObject>(floorIds.Count);
+            var list = new List<GameObject>(floorIds.Count + 2);
+            scrFloor labelFloor = null;
             for (int i = 0; i < floorIds.Count; i++)
             {
                 int floorId = floorIds[i];
                 if (floorId < 0 || floorId >= editor.floors.Count) continue;
                 scrFloor floor = editor.floors[floorId];
                 if (floor == null) continue;
+                if (labelFloor == null) labelFloor = floor;
 
                 var go = new GameObject("EditorTogether Remote Selection " + ShortId(clientId));
                 go.hideFlags = HideFlags.DontSave;
@@ -53,7 +55,48 @@ namespace EditorTogether
                 line.SetPosition(4, new Vector3(-r, -r, 0f));
                 list.Add(go);
             }
+
+            if (labelFloor != null)
+                CreateLabel(labelFloor.transform, clientId, displayName, color, list);
+
             objects[clientId ?? string.Empty] = list;
+        }
+
+        private static void CreateLabel(Transform parent, string clientId, string displayName, Color color, List<GameObject> list)
+        {
+            string text = string.IsNullOrWhiteSpace(displayName) ? ShortId(clientId) : displayName.Trim();
+            if (text.Length > 32) text = text.Substring(0, 32);
+
+            // A small dark shadow keeps the label readable over bright decorations.
+            var shadowGo = new GameObject("EditorTogether Remote Name Shadow " + ShortId(clientId));
+            shadowGo.hideFlags = HideFlags.DontSave;
+            shadowGo.transform.SetParent(parent, false);
+            shadowGo.transform.localPosition = new Vector3(0.025f, 0.745f, -0.31f);
+            var shadow = shadowGo.AddComponent<TextMesh>();
+            ConfigureText(shadow, text, new Color(0f, 0f, 0f, 0.9f), 32000);
+            list.Add(shadowGo);
+
+            var labelGo = new GameObject("EditorTogether Remote Name " + ShortId(clientId));
+            labelGo.hideFlags = HideFlags.DontSave;
+            labelGo.transform.SetParent(parent, false);
+            labelGo.transform.localPosition = new Vector3(0f, 0.77f, -0.32f);
+            var label = labelGo.AddComponent<TextMesh>();
+            ConfigureText(label, text, color, 32001);
+            list.Add(labelGo);
+        }
+
+        private static void ConfigureText(TextMesh textMesh, string text, Color color, int sortingOrder)
+        {
+            textMesh.text = text;
+            textMesh.anchor = TextAnchor.LowerCenter;
+            textMesh.alignment = TextAlignment.Center;
+            textMesh.fontSize = 42;
+            textMesh.characterSize = 0.095f;
+            textMesh.fontStyle = FontStyle.Bold;
+            textMesh.richText = false;
+            textMesh.color = color;
+            var renderer = textMesh.GetComponent<MeshRenderer>();
+            if (renderer != null) renderer.sortingOrder = sortingOrder;
         }
 
         public void Clear(string clientId)
