@@ -48,7 +48,7 @@ namespace EditorTogether
             return SendEnvelopeAsync(envelope);
         }
 
-        public Task SendPresenceAsync(string levelId, IReadOnlyList<int> selectedFloors)
+        public Task SendPresenceAsync(string levelId, string displayName, IReadOnlyList<int> selectedFloors)
         {
             var floors = new List<object>();
             if (selectedFloors != null)
@@ -58,6 +58,7 @@ namespace EditorTogether
             {
                 ["type"] = "presence",
                 ["clientId"] = ClientId,
+                ["displayName"] = displayName ?? string.Empty,
                 ["levelId"] = levelId ?? string.Empty,
                 ["selectedFloors"] = floors
             };
@@ -129,6 +130,7 @@ namespace EditorTogether
 
                         if (type == "presence")
                         {
+                            string displayName = json.TryGetValue("displayName", out object nameObj) ? Convert.ToString(nameObj) : string.Empty;
                             var floors = new List<int>();
                             if (json.TryGetValue("selectedFloors", out object floorsObj) && floorsObj is IList list)
                             {
@@ -137,7 +139,7 @@ namespace EditorTogether
                                     try { floors.Add(Convert.ToInt32(list[i])); } catch { }
                                 }
                             }
-                            incomingPresence.Enqueue(new PresenceMessage(clientId, levelId, floors.ToArray()));
+                            incomingPresence.Enqueue(new PresenceMessage(clientId, displayName, levelId, floors.ToArray()));
                             continue;
                         }
 
@@ -187,11 +189,15 @@ namespace EditorTogether
     internal sealed class PresenceMessage
     {
         public string ClientId { get; }
+        public string DisplayName { get; }
         public string LevelId { get; }
         public int[] SelectedFloors { get; }
-        public PresenceMessage(string clientId, string levelId, int[] selectedFloors)
+        public PresenceMessage(string clientId, string displayName, string levelId, int[] selectedFloors)
         {
-            ClientId = clientId; LevelId = levelId; SelectedFloors = selectedFloors ?? Array.Empty<int>();
+            ClientId = clientId;
+            DisplayName = displayName ?? string.Empty;
+            LevelId = levelId;
+            SelectedFloors = selectedFloors ?? Array.Empty<int>();
         }
     }
 }
