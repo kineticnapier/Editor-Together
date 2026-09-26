@@ -5,7 +5,7 @@
     <Nullable>disable</Nullable>
     <AssemblyName>EditorTogether</AssemblyName>
     <RootNamespace>EditorTogether</RootNamespace>
-    <Version>0.0.7</Version>
+    <Version>0.0.8</Version>
     <ADOFAIManagedPath Condition="'$(ADOFAIManagedPath)' == ''">C:\Program Files (x86)\Steam\steamapps\common\A Dance of Fire and Ice\A Dance of Fire and Ice_Data\Managed</ADOFAIManagedPath>
     <PackageDir>$(MSBuildProjectDirectory)\..\..\dist</PackageDir>
     <PackageStageDir>$(BaseIntermediateOutputPath)umm-package</PackageStageDir>
@@ -35,6 +35,10 @@
     </Reference>
     <Reference Include="UnityEngine.IMGUIModule">
       <HintPath>$(ADOFAIManagedPath)\UnityEngine.IMGUIModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>$(ADOFAIManagedPath)\UnityEngine.TextRenderingModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="System.Net.WebSockets" />
