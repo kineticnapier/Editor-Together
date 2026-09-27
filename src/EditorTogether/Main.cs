@@ -13,7 +13,7 @@ namespace EditorTogether
         internal static bool Enabled { get; private set; } = true;
         private static string serverUrl = "ws://127.0.0.1:38241/ws";
         private static string room = "default";
-        private static string displayName = string.IsNullOrWhiteSpace(Environment.UserName) ? "Player" : Environment.UserName;
+        private static string displayName = "Player";
         private static bool connecting;
         private static string status = "Disconnected";
 
