@@ -32,6 +32,16 @@ namespace EditorTogether
         private const float PresenceHeartbeatSeconds = 2f;
         private const float PresenceTimeoutSeconds = 6f;
 
+        // A client is not allowed to publish its local LevelData until it has applied the
+        // room's authoritative snapshot. This prevents an empty/default editor from
+        // overwriting everybody after rejoin or editor re-entry.
+        private bool clientSynchronized = true;
+        private bool syncRequestOutstanding;
+        private int syncGeneration;
+        private bool editorMissing;
+        private float findEditorRetryElapsed;
+        private const float FindEditorRetrySeconds = 0.50f;
+
         private long updateCalls;
         private long updateTicks;
         private long findEditorCalls;
@@ -46,10 +56,20 @@ namespace EditorTogether
         public long Revision { get; private set; }
         public bool IsConnected => transport.IsConnected;
         public bool IsHost => isHost;
+        public bool IsSynchronized => isHost || clientSynchronized;
         public string ClientId => transport.ClientId;
         public string LevelId => levelId;
         public string DisplayName => displayName;
         public string AssetStatus => assetSync.Status;
+        public string SyncStatus
+        {
+            get
+            {
+                if (!transport.IsConnected) return "Sync: Disconnected";
+                if (isHost) return "Sync: Host authoritative";
+                return clientSynchronized ? "Sync: Synchronized" : "Sync: Waiting for host state (local publishing blocked)";
+            }
+        }
 
         public CollaborationController(UnityModManager.ModEntry.ModLogger logger)
         {
@@ -92,6 +112,8 @@ namespace EditorTogether
         public async System.Threading.Tasks.Task CreateRoomAsync(string url)
         {
             isHost = true;
+            clientSynchronized = true;
+            syncRequestOutstanding = false;
             await ConnectCoreAsync(AddRole(url, "host")).ConfigureAwait(false);
             TryFindEditor();
             if (lastEditor == null) throw new InvalidOperationException("Open a chart in the editor before creating a room.");
@@ -103,11 +125,15 @@ namespace EditorTogether
             isHost = false;
             levelId = string.Empty;
             Revision = 0;
-            await ConnectCoreAsync(AddRole(url, "client")).ConfigureAwait(false);
+            clientSynchronized = false;
+            syncRequestOutstanding = false;
+            syncGeneration++;
+            await ConnectCoreAsync(AddQuery(AddRole(url, "client"), "sync", "explicit")).ConfigureAwait(false);
             TryFindEditor();
             if (lastEditor != null) ResetObservation(lastEditor);
             ForcePresenceRefresh();
-            logger.Log("[Collab] joined room; waiting for host snapshot");
+            RequireClientResync("joined room");
+            logger.Log("[Collab] joined room; explicit current-state sync requested");
         }
 
         public async System.Threading.Tasks.Task DisconnectAsync()
@@ -121,13 +147,19 @@ namespace EditorTogether
             catch { }
             await transport.DisconnectAsync(isHost ? "Host disconnected" : "Client disconnected").ConfigureAwait(false);
             isHost = false; levelId = string.Empty; Revision = 0;
+            clientSynchronized = true;
+            syncRequestOutstanding = false;
+            syncGeneration++;
+            editorMissing = false;
+            findEditorRetryElapsed = 0f;
             lastEditor = null; observedLevelData = null; observedLevelPath = string.Empty; observedSaveStateFrame = int.MinValue;
             ClearPresence();
             assetSync.Reset();
             logger.Log("[Collab] disconnected");
         }
 
-        private static string AddRole(string url, string role) => url + (url.Contains("?") ? "&" : "?") + "role=" + role;
+        private static string AddRole(string url, string role) => AddQuery(url, "role", role);
+        private static string AddQuery(string url, string key, string value) => url + (url.Contains("?") ? "&" : "?") + key + "=" + Uri.EscapeDataString(value ?? string.Empty);
         private async System.Threading.Tasks.Task ConnectCoreAsync(string url) { try { await transport.ConnectAsync(url).ConfigureAwait(false); } catch (Exception ex) { logger.Error($"[Collab] connection failed: {ex.Message}"); throw; } }
 
         private void TryFindEditor()
@@ -140,7 +172,16 @@ namespace EditorTogether
                 try { found = UnityEngine.Object.FindFirstObjectByType<scnEditor>(); }
                 catch { found = UnityEngine.Object.FindObjectOfType<scnEditor>(); }
                 if (found == null) return;
-                if (!ReferenceEquals(found, lastEditor)) { lastEditor = found; ResetObservation(found); ForcePresenceRefresh(); }
+                if (!ReferenceEquals(found, lastEditor))
+                {
+                    lastEditor = found;
+                    editorMissing = false;
+                    findEditorRetryElapsed = 0f;
+                    ResetObservation(found);
+                    ForcePresenceRefresh();
+                    if (transport.IsConnected && !isHost)
+                        RequireClientResync("editor instance changed");
+                }
             }
             finally { findEditorTicks += Stopwatch.GetTimestamp() - started; }
         }
@@ -154,9 +195,72 @@ namespace EditorTogether
             observedLevelPath = ReadLevelPath();
         }
 
+        private void RequireClientResync(string reason)
+        {
+            if (isHost || !transport.IsConnected) return;
+
+            clientSynchronized = false;
+            dirty = false;
+            dirtyElapsed = 0f;
+            syncGeneration++;
+            ClearRemoteSelections();
+            logger.Warning("[CollabSafety] client entered sync barrier: " + reason);
+
+            if (syncRequestOutstanding) return;
+            syncRequestOutstanding = true;
+            int generation = syncGeneration;
+            _ = RequestCurrentStateAsync(generation, reason);
+        }
+
+        private async System.Threading.Tasks.Task RequestCurrentStateAsync(int generation, string reason)
+        {
+            try
+            {
+                await transport.SendSyncRequestAsync().ConfigureAwait(false);
+                logger.Log($"[CollabSafety] sync-request sent; generation={generation}, reason={reason}");
+            }
+            catch (Exception ex)
+            {
+                if (syncGeneration == generation) syncRequestOutstanding = false;
+                logger.Error("[CollabSafety] sync-request failed: " + ex);
+            }
+        }
+
+        private async System.Threading.Tasks.Task CompleteClientSyncAsync(int generation, string synchronizedLevelId, long revision)
+        {
+            try
+            {
+                await transport.SendSyncReadyAsync(synchronizedLevelId, revision).ConfigureAwait(false);
+                if (!transport.IsConnected || isHost || generation != syncGeneration || !string.Equals(levelId, synchronizedLevelId, StringComparison.Ordinal))
+                    return;
+
+                clientSynchronized = true;
+                syncRequestOutstanding = false;
+                dirty = false;
+                dirtyElapsed = 0f;
+                ResetObservation(lastEditor);
+                ForcePresenceRefresh();
+                logger.Log($"[CollabSafety] synchronized; level={synchronizedLevelId}, revision={revision}, generation={generation}");
+            }
+            catch (Exception ex)
+            {
+                if (generation == syncGeneration) syncRequestOutstanding = false;
+                clientSynchronized = false;
+                logger.Error("[CollabSafety] sync-ready failed; publishing remains blocked: " + ex);
+            }
+        }
+
         private void ObserveEditor(scnEditor editor)
         {
             if (!transport.IsConnected || IsApplyingRemote) return;
+
+            if (!isHost && !clientSynchronized)
+            {
+                dirty = false;
+                dirtyElapsed = 0f;
+                ResetObservation(editor);
+                return;
+            }
 
             string currentLevelPath = ReadLevelPath();
             bool levelPathChanged = !string.Equals(observedLevelPath, currentLevelPath, StringComparison.OrdinalIgnoreCase);
@@ -186,7 +290,18 @@ namespace EditorTogether
         public void OnEditorStateSaved(scnEditor editor)
         {
             saveStateCalls++;
-            if (editor != null) lastEditor = editor;
+            if (editor == null) return;
+
+            if (!ReferenceEquals(editor, lastEditor))
+            {
+                lastEditor = editor;
+                editorMissing = false;
+                findEditorRetryElapsed = 0f;
+                ResetObservation(editor);
+                ForcePresenceRefresh();
+                if (transport.IsConnected && !isHost)
+                    RequireClientResync("SaveState observed on a new editor instance");
+            }
         }
 
         private void BeginNewLevel(scnEditor editor, bool publish)
@@ -211,6 +326,18 @@ namespace EditorTogether
             try
             {
                 if (!transport.IsConnected) return;
+                if (!isHost && !clientSynchronized)
+                {
+                    logger.Warning("[CollabSafety] blocked local snapshot while client is waiting for authoritative state");
+                    dirty = false;
+                    dirtyElapsed = 0f;
+                    return;
+                }
+                if (editor == null || editor.levelData == null)
+                {
+                    logger.Warning("[CollabSafety] blocked snapshot because editor/LevelData is unavailable");
+                    return;
+                }
                 if (string.IsNullOrEmpty(levelId)) levelId = Guid.NewGuid().ToString("N");
                 string encodedLevel = editor.levelData.Encode();
                 Revision++;
@@ -240,8 +367,27 @@ namespace EditorTogether
                     return;
                 }
 
-                if (lastEditor == null) TryFindEditor();
-                if (lastEditor == null) return;
+                if (lastEditor == null)
+                {
+                    if (!editorMissing)
+                    {
+                        editorMissing = true;
+                        if (!isHost) RequireClientResync("editor closed or unavailable");
+                    }
+
+                    findEditorRetryElapsed += dt;
+                    if (findEditorRetryElapsed >= FindEditorRetrySeconds)
+                    {
+                        findEditorRetryElapsed = 0f;
+                        TryFindEditor();
+                    }
+                    if (lastEditor == null) return;
+                }
+                else
+                {
+                    editorMissing = false;
+                    findEditorRetryElapsed = 0f;
+                }
 
                 SnapshotMessage newest = null;
                 while (transport.TryDequeue(out SnapshotMessage message)) newest = message;
@@ -264,7 +410,7 @@ namespace EditorTogether
                 UpdateLocalPresence(lastEditor, dt);
                 CleanupPresence(dt);
                 ObserveEditor(lastEditor);
-                if (!dirty || IsApplyingRemote) return;
+                if (!dirty || IsApplyingRemote || (!isHost && !clientSynchronized)) return;
                 dirtyElapsed += dt;
                 if (dirtyElapsed < DebounceDelay) return;
                 dirty = false; dirtyElapsed = 0f;
@@ -298,7 +444,7 @@ namespace EditorTogether
         private void UpdateLocalPresence(scnEditor editor, float dt)
         {
             var floors = new List<int>();
-            if (editor.selectedFloors != null)
+            if ((isHost || clientSynchronized) && editor.selectedFloors != null)
             {
                 for (int i = 0; i < editor.selectedFloors.Count; i++)
                 {
@@ -393,7 +539,7 @@ namespace EditorTogether
         {
             double tickMs = 1000.0 / Stopwatch.Frequency;
             long memory = GC.GetTotalMemory(false);
-            logger.Log($"[CollabPerf] connected={transport.IsConnected} enabled={Main.Enabled} window={diagnosticsElapsed:F1}s " +
+            logger.Log($"[CollabPerf] connected={transport.IsConnected} enabled={Main.Enabled} sync={(isHost ? "host" : (clientSynchronized ? "ready" : "blocked"))} window={diagnosticsElapsed:F1}s " +
                        $"update={updateCalls} calls/{updateTicks * tickMs:F2}ms " +
                        $"findEditor={findEditorCalls} calls/{findEditorTicks * tickMs:F2}ms " +
                        $"SaveState={saveStateCalls} publish={publishCalls}/{publishTicks * tickMs:F2}ms " +
@@ -404,15 +550,17 @@ namespace EditorTogether
 
         private void ApplyRemoteSnapshot(scnEditor editor, SnapshotMessage snapshot)
         {
-            if (!snapshot.IsLevelSwitch && !string.IsNullOrEmpty(levelId) && snapshot.LevelId != levelId)
+            bool waitingForAuthoritativeState = !isHost && !clientSynchronized;
+            if (!snapshot.IsLevelSwitch && !waitingForAuthoritativeState && !string.IsNullOrEmpty(levelId) && snapshot.LevelId != levelId)
             {
                 logger.Log($"[Collab] ignored stale snapshot for level={snapshot.LevelId}");
                 return;
             }
 
-            bool enteringRemoteLevel = !isHost && (snapshot.IsLevelSwitch || string.IsNullOrEmpty(levelId) || !string.Equals(levelId, snapshot.LevelId, StringComparison.Ordinal));
+            bool enteringRemoteLevel = !isHost && (waitingForAuthoritativeState || snapshot.IsLevelSwitch || string.IsNullOrEmpty(levelId) || !string.Equals(levelId, snapshot.LevelId, StringComparison.Ordinal));
             if (snapshot.IsLevelSwitch) ClearRemoteSelections();
             appliedSnapshots++;
+            bool appliedSuccessfully = false;
             ApplyRemote(() =>
             {
                 var dictionary = RuntimeJson.Deserialize(snapshot.LevelData) as Dictionary<string, object>;
@@ -432,8 +580,16 @@ namespace EditorTogether
                 if (!isHost && assetSync.IsLevelReady(levelId))
                     ReloadRemoteAssets(editor);
 
+                appliedSuccessfully = true;
                 logger.Log($"[Collab] applied {(snapshot.IsLevelSwitch ? "level switch" : "snapshot")}; level={levelId}, revision={snapshot.Revision}, from={snapshot.ClientId}, loadResult={loadResult}");
             });
+
+            if (appliedSuccessfully && waitingForAuthoritativeState)
+            {
+                syncRequestOutstanding = false;
+                int generation = syncGeneration;
+                _ = CompleteClientSyncAsync(generation, snapshot.LevelId, snapshot.Revision);
+            }
         }
 
         public void ApplyRemote(Action apply) { if (apply == null) throw new ArgumentNullException(nameof(apply)); IsApplyingRemote = true; try { apply(); } catch (Exception ex) { logger.Error($"[Collab] remote apply failed: {ex}"); } finally { IsApplyingRemote = false; } }
