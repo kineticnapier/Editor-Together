@@ -12,6 +12,7 @@ namespace EditorTogether
     {
         private readonly UnityModManager.ModEntry.ModLogger logger;
         private readonly WebSocketTransport transport;
+        private readonly AssetSyncManager assetSync;
         private readonly RemotePresenceOverlay presenceOverlay = new RemotePresenceOverlay();
         private static readonly System.Reflection.FieldInfo SaveStateLastFrameField = AccessTools.Field(typeof(scnEditor), "saveStateLastFrame");
         private readonly Dictionary<string, RemotePresenceState> remotePresence = new Dictionary<string, RemotePresenceState>();
@@ -48,8 +49,14 @@ namespace EditorTogether
         public string ClientId => transport.ClientId;
         public string LevelId => levelId;
         public string DisplayName => displayName;
+        public string AssetStatus => assetSync.Status;
 
-        public CollaborationController(UnityModManager.ModEntry.ModLogger logger) { this.logger = logger; transport = new WebSocketTransport(logger); }
+        public CollaborationController(UnityModManager.ModEntry.ModLogger logger)
+        {
+            this.logger = logger;
+            transport = new WebSocketTransport(logger);
+            assetSync = new AssetSyncManager(logger, transport);
+        }
 
         public void SetDisplayName(string value)
         {
@@ -116,6 +123,7 @@ namespace EditorTogether
             isHost = false; levelId = string.Empty; Revision = 0;
             lastEditor = null; observedLevelData = null; observedLevelPath = string.Empty; observedSaveStateFrame = int.MinValue;
             ClearPresence();
+            assetSync.Reset();
             logger.Log("[Collab] disconnected");
         }
 
@@ -189,7 +197,11 @@ namespace EditorTogether
             ClearRemoteSelections();
             ForcePresenceRefresh();
             logger.Log($"[Collab] host level changed; levelId={levelId}");
-            if (publish) PublishSnapshot(editor, true);
+            if (publish)
+            {
+                PublishSnapshot(editor, true);
+                _ = assetSync.PublishHostManifestAsync(levelId, editor.levelData, ReadLevelPath());
+            }
         }
 
         private void PublishSnapshot(scnEditor editor, bool levelSwitch = false)
@@ -235,6 +247,17 @@ namespace EditorTogether
                 while (transport.TryDequeue(out SnapshotMessage message)) newest = message;
                 if (newest != null) ApplyRemoteSnapshot(lastEditor, newest);
 
+                while (transport.TryDequeueAssetManifest(out AssetManifestMessage manifest))
+                {
+                    if (!isHost) assetSync.QueueRemoteManifest(manifest);
+                }
+
+                while (assetSync.TryDequeueCompleted(out string completedLevel))
+                {
+                    if (!isHost && string.Equals(completedLevel, levelId, StringComparison.Ordinal))
+                        ReloadRemoteAssets(lastEditor);
+                }
+
                 while (transport.TryDequeuePresence(out PresenceMessage presence))
                     ApplyPresence(lastEditor, presence);
 
@@ -252,6 +275,23 @@ namespace EditorTogether
             {
                 updateTicks += Stopwatch.GetTimestamp() - started;
                 if (diagnosticsElapsed >= 5f) FlushDiagnostics();
+            }
+        }
+
+        private void ReloadRemoteAssets(scnEditor editor)
+        {
+            if (editor == null || editor.customLevel == null) return;
+            try
+            {
+                AccessTools.Method(typeof(scnEditor), "UpdateSongAndLevelSettings")?.Invoke(editor, null);
+                editor.customLevel.ReloadSong(false);
+                editor.customLevel.ReloadAssets(true, false);
+                AccessTools.Method(typeof(scnEditor), "UpdateDecorationObjects")?.Invoke(editor, null);
+                logger.Log($"[CollabAssets] reloaded downloaded assets for level={levelId}");
+            }
+            catch (Exception ex)
+            {
+                logger.Error("[CollabAssets] asset reload failed: " + ex);
             }
         }
 
@@ -304,8 +344,6 @@ namespace EditorTogether
             if (string.IsNullOrEmpty(name)) name = message.ClientId.Length > 6 ? message.ClientId.Substring(0, 6) : message.ClientId;
             remotePresence[message.ClientId] = new RemotePresenceState(name, message.IsHost, message.SelectedFloors, Time.realtimeSinceStartup);
 
-            // Participant presence is room-wide, while selection overlays only make sense
-            // when both peers are looking at the same chart generation.
             if (string.IsNullOrEmpty(levelId) || message.LevelId != levelId || message.SelectedFloors.Length == 0)
             {
                 presenceOverlay.Clear(message.ClientId);
@@ -372,6 +410,7 @@ namespace EditorTogether
                 return;
             }
 
+            bool enteringRemoteLevel = !isHost && (snapshot.IsLevelSwitch || string.IsNullOrEmpty(levelId) || !string.Equals(levelId, snapshot.LevelId, StringComparison.Ordinal));
             if (snapshot.IsLevelSwitch) ClearRemoteSelections();
             appliedSnapshots++;
             ApplyRemote(() =>
@@ -379,18 +418,26 @@ namespace EditorTogether
                 var dictionary = RuntimeJson.Deserialize(snapshot.LevelData) as Dictionary<string, object>;
                 if (dictionary == null) throw new InvalidOperationException("Remote LevelData was not a JSON object.");
                 var data = new LevelData(); data.Setup(); LoadResult loadResult; data.Decode(dictionary, out loadResult);
+
+                if (enteringRemoteLevel)
+                    editor.customLevel.levelPath = assetSync.PrepareRemoteLevel(snapshot.LevelId, snapshot.LevelData);
+
                 editor.customLevel.levelData = data;
                 editor.RemakePath(true, true);
                 AccessTools.Method(typeof(scnEditor), "UpdateDecorationObjects")?.Invoke(editor, null);
                 levelId = snapshot.LevelId;
                 Revision = snapshot.IsLevelSwitch ? snapshot.Revision : Math.Max(Revision, snapshot.Revision);
                 dirty = false; dirtyElapsed = 0f; ResetObservation(editor); ForcePresenceRefresh();
+
+                if (!isHost && assetSync.IsLevelReady(levelId))
+                    ReloadRemoteAssets(editor);
+
                 logger.Log($"[Collab] applied {(snapshot.IsLevelSwitch ? "level switch" : "snapshot")}; level={levelId}, revision={snapshot.Revision}, from={snapshot.ClientId}, loadResult={loadResult}");
             });
         }
 
         public void ApplyRemote(Action apply) { if (apply == null) throw new ArgumentNullException(nameof(apply)); IsApplyingRemote = true; try { apply(); } catch (Exception ex) { logger.Error($"[Collab] remote apply failed: {ex}"); } finally { IsApplyingRemote = false; } }
-        public void Dispose() { presenceOverlay.Dispose(); transport.Dispose(); }
+        public void Dispose() { presenceOverlay.Dispose(); assetSync.Dispose(); transport.Dispose(); }
 
         private sealed class RemotePresenceState
         {
