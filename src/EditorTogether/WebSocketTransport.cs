@@ -17,10 +17,29 @@ namespace EditorTogether
         private readonly SemaphoreSlim sendGate = new SemaphoreSlim(1, 1);
         private ClientWebSocket socket;
         private CancellationTokenSource cancellation;
+        private Uri connectedUri;
         private readonly ConcurrentQueue<SnapshotMessage> incoming = new ConcurrentQueue<SnapshotMessage>();
         private readonly ConcurrentQueue<PresenceMessage> incomingPresence = new ConcurrentQueue<PresenceMessage>();
+        private readonly ConcurrentQueue<AssetManifestMessage> incomingAssetManifests = new ConcurrentQueue<AssetManifestMessage>();
         public string ClientId { get; } = Guid.NewGuid().ToString("N");
         public bool IsConnected => socket != null && socket.State == WebSocketState.Open;
+
+        public Uri HttpBaseUri
+        {
+            get
+            {
+                Uri value = connectedUri;
+                if (value == null) return null;
+                var builder = new UriBuilder(value)
+                {
+                    Scheme = string.Equals(value.Scheme, "wss", StringComparison.OrdinalIgnoreCase) ? "https" : "http",
+                    Path = "/",
+                    Query = string.Empty,
+                    Fragment = string.Empty
+                };
+                return builder.Uri;
+            }
+        }
 
         public WebSocketTransport(UnityModManager.ModEntry.ModLogger logger) { this.logger = logger; }
 
@@ -28,9 +47,10 @@ namespace EditorTogether
         {
             if (IsConnected) return;
             CleanupSocket();
+            connectedUri = new Uri(url);
             socket = new ClientWebSocket();
             cancellation = new CancellationTokenSource();
-            await socket.ConnectAsync(new Uri(url), cancellation.Token).ConfigureAwait(false);
+            await socket.ConnectAsync(connectedUri, cancellation.Token).ConfigureAwait(false);
             logger.Log($"[Collab] connected to {url} as {ClientId}");
             _ = Task.Run(ReceiveLoopAsync);
         }
@@ -67,6 +87,34 @@ namespace EditorTogether
             return SendEnvelopeAsync(envelope);
         }
 
+        public Task SendAssetManifestAsync(string levelId, IReadOnlyList<AssetDescriptor> assets)
+        {
+            var entries = new List<object>();
+            if (assets != null)
+            {
+                for (int i = 0; i < assets.Count; i++)
+                {
+                    AssetDescriptor asset = assets[i];
+                    if (asset == null) continue;
+                    entries.Add(new Dictionary<string, object>
+                    {
+                        ["path"] = asset.Path,
+                        ["hash"] = asset.Hash,
+                        ["size"] = asset.Size
+                    });
+                }
+            }
+
+            var envelope = new Dictionary<string, object>
+            {
+                ["type"] = "asset-manifest",
+                ["clientId"] = ClientId,
+                ["levelId"] = levelId ?? string.Empty,
+                ["assets"] = entries
+            };
+            return SendEnvelopeAsync(envelope);
+        }
+
         private async Task SendEnvelopeAsync(Dictionary<string, object> envelope)
         {
             var current = socket;
@@ -85,6 +133,7 @@ namespace EditorTogether
 
         public bool TryDequeue(out SnapshotMessage message) => incoming.TryDequeue(out message);
         public bool TryDequeuePresence(out PresenceMessage message) => incomingPresence.TryDequeue(out message);
+        public bool TryDequeueAssetManifest(out AssetManifestMessage message) => incomingAssetManifests.TryDequeue(out message);
 
         public async Task DisconnectAsync(string reason = "Disconnected")
         {
@@ -147,6 +196,24 @@ namespace EditorTogether
                             continue;
                         }
 
+                        if (type == "asset-manifest")
+                        {
+                            var assets = new List<AssetDescriptor>();
+                            if (json.TryGetValue("assets", out object assetsObj) && assetsObj is IList list)
+                            {
+                                for (int i = 0; i < list.Count; i++)
+                                {
+                                    if (!(list[i] is Dictionary<string, object> entry)) continue;
+                                    string path = entry.TryGetValue("path", out object pathObj) ? Convert.ToString(pathObj) : string.Empty;
+                                    string hash = entry.TryGetValue("hash", out object hashObj) ? Convert.ToString(hashObj) : string.Empty;
+                                    long size = entry.TryGetValue("size", out object sizeObj) ? Convert.ToInt64(sizeObj) : 0L;
+                                    assets.Add(new AssetDescriptor(path, hash, size));
+                                }
+                            }
+                            incomingAssetManifests.Enqueue(new AssetManifestMessage(clientId, levelId, assets.ToArray()));
+                            continue;
+                        }
+
                         if (type != "snapshot" && type != "level-switch") continue;
                         long revision = json.TryGetValue("revision", out object revisionObj) ? Convert.ToInt64(revisionObj) : 0;
                         string levelData = json.TryGetValue("levelData", out object levelObj) ? Convert.ToString(levelObj) : string.Empty;
@@ -165,8 +232,10 @@ namespace EditorTogether
             try { cancellation?.Dispose(); } catch { }
             socket = null;
             cancellation = null;
+            connectedUri = null;
             while (incoming.TryDequeue(out _)) { }
             while (incomingPresence.TryDequeue(out _)) { }
+            while (incomingAssetManifests.TryDequeue(out _)) { }
         }
 
         public void Dispose()
