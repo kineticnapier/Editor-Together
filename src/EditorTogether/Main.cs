@@ -17,6 +17,11 @@ namespace EditorTogether
         private static bool connecting;
         private static string status = "Disconnected";
 
+        private static bool showAdvancedOptions;
+        private static string debugModeCode = string.Empty;
+        private static bool debugModeEnabled;
+        private const string DebugUnlockCode = "debug";
+
         public static bool Load(UnityModManager.ModEntry modEntry)
         {
             ModEntry = modEntry;
@@ -120,6 +125,57 @@ namespace EditorTogether
                     }
                 }
             }
+
+            GUILayout.Space(8f);
+            if (GUILayout.Button((showAdvancedOptions ? "▼ " : "▶ ") + "Advanced options", GUILayout.Width(180f)))
+                showAdvancedOptions = !showAdvancedOptions;
+
+            if (showAdvancedOptions)
+            {
+                GUILayout.BeginVertical("box");
+                GUILayout.Label("Debug mode");
+
+                if (!debugModeEnabled)
+                {
+                    GUILayout.BeginHorizontal();
+                    GUILayout.Label("Code", GUILayout.Width(80f));
+                    debugModeCode = GUILayout.PasswordField(debugModeCode, '*', GUILayout.Width(180f));
+                    if (GUILayout.Button("Unlock", GUILayout.Width(90f)))
+                    {
+                        if (string.Equals(debugModeCode, DebugUnlockCode, StringComparison.Ordinal))
+                        {
+                            debugModeEnabled = true;
+                            debugModeCode = string.Empty;
+                            modEntry.Logger.Warning("[CollabDebug] debug mode enabled");
+                        }
+                        else
+                        {
+                            debugModeCode = string.Empty;
+                            modEntry.Logger.Warning("[CollabDebug] invalid debug code");
+                        }
+                    }
+                    GUILayout.EndHorizontal();
+                }
+                else
+                {
+                    GUILayout.Label("Debug mode: ENABLED");
+                    GUILayout.BeginHorizontal();
+                    GUI.enabled = Controller != null && Controller.IsConnected;
+                    if (GUILayout.Button("Simulate Network Drop", GUILayout.Width(190f)))
+                    {
+                        bool injected = WebSocketTransport.DebugAbortCurrent();
+                        status = injected ? "Debug: network drop injected" : "Debug: no open WebSocket";
+                    }
+                    GUI.enabled = true;
+                    if (GUILayout.Button("Lock Debug Mode", GUILayout.Width(140f)))
+                        debugModeEnabled = false;
+                    GUILayout.EndHorizontal();
+                    GUILayout.Label("Network Drop aborts the WebSocket without a close handshake.");
+                }
+
+                GUILayout.EndVertical();
+            }
+
             GUILayout.Space(4f); GUILayout.Label("Remote selected tiles are shown as colored outlines with player names.");
             GUILayout.Label("Referenced song/image/video assets are cached and synchronized by SHA-256.");
             GUILayout.Label("Host level changes are broadcast to everyone. Host disconnect closes the room.");
