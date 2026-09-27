@@ -16,6 +16,23 @@ namespace EditorTogether.Patches
             PendingAssetReload = false;
             DeferralLogged = false;
         }
+
+        internal static void QueueSnapshot(SnapshotMessage snapshot)
+        {
+            if (snapshot == null) return;
+
+            // If a level-switch is followed by newer snapshots for that same level while
+            // playback is still active, keep the level-switch semantics while coalescing
+            // to the newest chart body. Otherwise the final non-switch snapshot would be
+            // rejected as stale against the previous local levelId.
+            SnapshotMessage previous = PendingSnapshot;
+            bool preserveLevelSwitch = snapshot.IsLevelSwitch ||
+                (previous != null && previous.IsLevelSwitch && string.Equals(previous.LevelId, snapshot.LevelId, StringComparison.Ordinal));
+
+            PendingSnapshot = preserveLevelSwitch && !snapshot.IsLevelSwitch
+                ? new SnapshotMessage(snapshot.ClientId, snapshot.LevelId, snapshot.Revision, snapshot.LevelData, true)
+                : snapshot;
+        }
     }
 
     [HarmonyPatch]
@@ -28,7 +45,7 @@ namespace EditorTogether.Patches
         {
             if (editor == null || !editor.playMode) return true;
 
-            PlaybackSafetyState.PendingSnapshot = snapshot;
+            PlaybackSafetyState.QueueSnapshot(snapshot);
             if (!PlaybackSafetyState.DeferralLogged)
             {
                 PlaybackSafetyState.DeferralLogged = true;

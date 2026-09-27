@@ -43,7 +43,7 @@ namespace EditorTogether.Patches
             {
                 trackedEditor = __instance;
                 trackedLevelId = levelId;
-                trackedFingerprint = BuildFingerprint(__instance);
+                trackedFingerprint = BuildFingerprintSafe(__instance);
                 nextScanAt = Time.unscaledTime + ScanIntervalSeconds;
                 return;
             }
@@ -52,7 +52,7 @@ namespace EditorTogether.Patches
             if (now < nextScanAt) return;
             nextScanAt = now + ScanIntervalSeconds;
 
-            string nextFingerprint = BuildFingerprint(__instance);
+            string nextFingerprint = BuildFingerprintSafe(__instance);
             if (string.Equals(trackedFingerprint, nextFingerprint, StringComparison.Ordinal)) return;
             trackedFingerprint = nextFingerprint;
 
@@ -68,6 +68,16 @@ namespace EditorTogether.Patches
             catch (Exception ex)
             {
                 Main.ModEntry?.Logger.Error("[CollabAssets] failed to refresh host asset manifest: " + ex);
+            }
+        }
+
+        private static string BuildFingerprintSafe(scnEditor editor)
+        {
+            try { return BuildFingerprint(editor); }
+            catch (Exception ex)
+            {
+                Main.ModEntry?.Logger.Warning("[CollabAssets] asset fingerprint scan failed: " + ex.Message);
+                return "scan-error";
             }
         }
 
@@ -154,14 +164,22 @@ namespace EditorTogether.Patches
         private static bool TryResolveInside(string root, string relativePath, out string fullPath)
         {
             fullPath = null;
-            if (string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(relativePath)) return false;
-            if (Path.IsPathRooted(relativePath)) return false;
+            try
+            {
+                if (string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(relativePath)) return false;
+                if (Path.IsPathRooted(relativePath)) return false;
 
-            string rootFull = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
-            string candidate = Path.GetFullPath(Path.Combine(rootFull, relativePath.Replace('/', Path.DirectorySeparatorChar)));
-            if (!candidate.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase)) return false;
-            fullPath = candidate;
-            return true;
+                string rootFull = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+                string candidate = Path.GetFullPath(Path.Combine(rootFull, relativePath.Replace('/', Path.DirectorySeparatorChar)));
+                if (!candidate.StartsWith(rootFull, StringComparison.OrdinalIgnoreCase)) return false;
+                fullPath = candidate;
+                return true;
+            }
+            catch
+            {
+                fullPath = null;
+                return false;
+            }
         }
 
         private static void Reset()
