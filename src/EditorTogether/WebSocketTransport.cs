@@ -60,8 +60,6 @@ namespace EditorTogether
             instance.logger.Warning("[CollabDebug] simulating abrupt network drop");
             try
             {
-                // Abort intentionally skips the normal close handshake so this behaves like
-                // Wi-Fi/VPN/TCP loss rather than the user's Disconnect button.
                 current.Abort();
                 return true;
             }
@@ -140,6 +138,28 @@ namespace EditorTogether
                 ["clientId"] = ClientId,
                 ["levelId"] = levelId ?? string.Empty,
                 ["assets"] = entries
+            };
+            return SendEnvelopeAsync(envelope);
+        }
+
+        public Task SendSyncRequestAsync()
+        {
+            var envelope = new Dictionary<string, object>
+            {
+                ["type"] = "sync-request",
+                ["clientId"] = ClientId
+            };
+            return SendEnvelopeAsync(envelope);
+        }
+
+        public Task SendSyncReadyAsync(string levelId, long revision)
+        {
+            var envelope = new Dictionary<string, object>
+            {
+                ["type"] = "sync-ready",
+                ["clientId"] = ClientId,
+                ["levelId"] = levelId ?? string.Empty,
+                ["revision"] = revision
             };
             return SendEnvelopeAsync(envelope);
         }
