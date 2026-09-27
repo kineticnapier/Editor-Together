@@ -97,6 +97,7 @@ namespace EditorTogether
                 GUILayout.Label("Client: " + ShortId(Controller.ClientId));
                 GUILayout.Label("Revision: " + Controller.Revision);
                 GUILayout.Label("Level: " + Controller.LevelId);
+                GUILayout.Label(Controller.AssetStatus);
 
                 if (Controller.IsConnected)
                 {
@@ -120,6 +121,7 @@ namespace EditorTogether
                 }
             }
             GUILayout.Space(4f); GUILayout.Label("Remote selected tiles are shown as colored outlines with player names.");
+            GUILayout.Label("Referenced song/image/video assets are cached and synchronized by SHA-256.");
             GUILayout.Label("Host level changes are broadcast to everyone. Host disconnect closes the room.");
         }
 
