@@ -13,6 +13,8 @@ namespace EditorTogether
 {
     internal sealed class WebSocketTransport : IDisposable
     {
+        private static WebSocketTransport debugInstance;
+
         private readonly UnityModManager.ModEntry.ModLogger logger;
         private readonly SemaphoreSlim sendGate = new SemaphoreSlim(1, 1);
         private ClientWebSocket socket;
@@ -41,7 +43,34 @@ namespace EditorTogether
             }
         }
 
-        public WebSocketTransport(UnityModManager.ModEntry.ModLogger logger) { this.logger = logger; }
+        public WebSocketTransport(UnityModManager.ModEntry.ModLogger logger)
+        {
+            this.logger = logger;
+            debugInstance = this;
+        }
+
+        internal static bool DebugAbortCurrent()
+        {
+            WebSocketTransport instance = debugInstance;
+            if (instance == null) return false;
+
+            ClientWebSocket current = instance.socket;
+            if (current == null || current.State != WebSocketState.Open) return false;
+
+            instance.logger.Warning("[CollabDebug] simulating abrupt network drop");
+            try
+            {
+                // Abort intentionally skips the normal close handshake so this behaves like
+                // Wi-Fi/VPN/TCP loss rather than the user's Disconnect button.
+                current.Abort();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                instance.logger.Error("[CollabDebug] network-drop injection failed: " + ex);
+                return false;
+            }
+        }
 
         public async Task ConnectAsync(string url)
         {
@@ -240,6 +269,7 @@ namespace EditorTogether
 
         public void Dispose()
         {
+            if (ReferenceEquals(debugInstance, this)) debugInstance = null;
             try { DisconnectAsync("Mod unloaded").Wait(500); } catch { }
             CleanupSocket();
             sendGate.Dispose();
