@@ -119,6 +119,11 @@ namespace EditorTogether.Patches
                     loggedActive = true;
                     Main.ModEntry?.Logger.Log("[CollabOps] undo-state capture active; pre-edit LevelData recovered from scnEditor.undoStates");
                 }
+
+                // Harmony postfix ordering differs from prefix ordering. Flush here as well
+                // so the recovered state is consumed this frame regardless of whether the
+                // normal OperationSync LateUpdate postfix ran before or after this patch.
+                OperationSyncManager.Update(__instance);
             }
             catch (Exception ex)
             {
