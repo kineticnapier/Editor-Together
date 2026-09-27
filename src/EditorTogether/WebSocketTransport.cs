@@ -11,7 +11,7 @@ using UnityModManagerNet;
 
 namespace EditorTogether
 {
-    internal sealed class WebSocketTransport : IDisposable
+    internal sealed partial class WebSocketTransport : IDisposable
     {
         private static WebSocketTransport debugInstance;
 
@@ -170,6 +170,7 @@ namespace EditorTogether
             var currentCancellation = cancellation;
             if (current == null || currentCancellation == null || current.State != WebSocketState.Open) return;
 
+            envelope["protocolVersion"] = OperationSyncManager.ProtocolVersion;
             byte[] bytes = Encoding.UTF8.GetBytes(RuntimeJson.Serialize(envelope));
             await sendGate.WaitAsync(currentCancellation.Token).ConfigureAwait(false);
             try
@@ -263,6 +264,8 @@ namespace EditorTogether
                             continue;
                         }
 
+                        if (TryHandleOperationEnvelope(json, type, clientId, levelId)) continue;
+
                         if (type != "snapshot" && type != "level-switch") continue;
                         long revision = json.TryGetValue("revision", out object revisionObj) ? Convert.ToInt64(revisionObj) : 0;
                         string levelData = json.TryGetValue("levelData", out object levelObj) ? Convert.ToString(levelObj) : string.Empty;
@@ -285,6 +288,7 @@ namespace EditorTogether
             while (incoming.TryDequeue(out _)) { }
             while (incomingPresence.TryDequeue(out _)) { }
             while (incomingAssetManifests.TryDequeue(out _)) { }
+            ClearOperationQueues();
         }
 
         public void Dispose()
@@ -322,7 +326,7 @@ namespace EditorTogether
             ClientId = clientId;
             DisplayName = displayName ?? string.Empty;
             IsHost = isHost;
-            IsLeaving = isLeaving;
+            IsLeaving = leaving;
             LevelId = levelId;
             SelectedFloors = selectedFloors ?? Array.Empty<int>();
         }
