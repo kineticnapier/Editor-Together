@@ -33,6 +33,7 @@ namespace EditorTogether
         private static readonly PropertyInfo IsOldLevelProperty = AccessTools.Property(typeof(scnEditor), "isOldLevel");
         private static readonly MethodInfo UpdateDecorationObjectsMethod = AccessTools.Method(typeof(scnEditor), "UpdateDecorationObjects");
         private static readonly MethodInfo ApplyEventsToFloorsMethod = AccessTools.Method(typeof(scnEditor), "ApplyEventsToFloors");
+        private static readonly FieldInfo LevelEventDataField = AccessTools.Field(typeof(LevelEvent), "data");
 
         private static EditorStateCapture pendingBefore;
         private static scnEditor pendingEditor;
@@ -114,9 +115,6 @@ namespace EditorTogether
             CollaborationController controller = Main.Controller;
             if (controller == null || !controller.IsConnected) return true;
 
-            // If the v2 diff path handled the latest data-changing SaveState, the old
-            // 200 ms full-snapshot publisher is redundant and must be suppressed.
-            // If capture/diff failed, allow the old snapshot as a fail-safe.
             return handledMutationSerial != mutationSerial;
         }
 
@@ -258,8 +256,6 @@ namespace EditorTogether
                     OperationBatchMessage batch = deferredIncoming[i];
                     if (!string.Equals(batch.LevelId, controller.LevelId, StringComparison.Ordinal))
                     {
-                        // Keep future-level batches until the level-switch snapshot arrives;
-                        // discard definitely stale batches.
                         if (!string.IsNullOrEmpty(controller.LevelId) && batch.Revision <= controller.Revision)
                         {
                             deferredIncoming.RemoveAt(i--);
@@ -296,7 +292,6 @@ namespace EditorTogether
                 }
             } while (progressed);
 
-            // If the next operation is now behind/ahead in an impossible way, resync.
             if (deferredIncoming.Count > 0)
             {
                 OperationBatchMessage next = deferredIncoming[0];
@@ -425,20 +420,13 @@ namespace EditorTogether
                     floorChanged = true;
                     break;
                 }
-                case "add-event":
-                    ApplyAddEvent(editor.events, op); eventChanged = true; break;
-                case "remove-event":
-                    ApplyRemoveEvent(editor.events, op); eventChanged = true; break;
-                case "update-event":
-                    ApplyUpdateEvent(editor.events, op); eventChanged = true; break;
-                case "add-decoration":
-                    ApplyAddEvent(editor.decorations, op); decorationChanged = true; break;
-                case "remove-decoration":
-                    ApplyRemoveEvent(editor.decorations, op); decorationChanged = true; break;
-                case "update-decoration":
-                    ApplyUpdateEvent(editor.decorations, op); decorationChanged = true; break;
-                default:
-                    throw new InvalidOperationException("Unknown operation: " + type);
+                case "add-event": ApplyAddEvent(editor.events, op); eventChanged = true; break;
+                case "remove-event": ApplyRemoveEvent(editor.events, op); eventChanged = true; break;
+                case "update-event": ApplyUpdateEvent(editor.events, op); eventChanged = true; break;
+                case "add-decoration": ApplyAddEvent(editor.decorations, op); decorationChanged = true; break;
+                case "remove-decoration": ApplyRemoveEvent(editor.decorations, op); decorationChanged = true; break;
+                case "update-decoration": ApplyUpdateEvent(editor.decorations, op); decorationChanged = true; break;
+                default: throw new InvalidOperationException("Unknown operation: " + type);
             }
         }
 
@@ -500,12 +488,14 @@ namespace EditorTogether
 
         private static void AdjustTileRangeProperty(LevelEvent levelEvent, string key, int sequenceId)
         {
-            if (levelEvent == null || !levelEvent.data.ContainsKey(key) || levelEvent.data[key] == null) return;
-            Tuple<int, TileRelativeTo> tuple = scnGame.StringToTile(levelEvent.data[key].ToString());
+            if (levelEvent == null) return;
+            Dictionary<string, object> eventData = GetEventData(levelEvent);
+            if (!eventData.TryGetValue(key, out object value) || value == null) return;
+            Tuple<int, TileRelativeTo> tuple = scnGame.StringToTile(value.ToString());
             if (tuple.Item2 == TileRelativeTo.Start && tuple.Item1 > sequenceId)
-                levelEvent.data[key] = new Tuple<int, TileRelativeTo>(tuple.Item1 + 1, TileRelativeTo.Start);
+                eventData[key] = new Tuple<int, TileRelativeTo>(tuple.Item1 + 1, TileRelativeTo.Start);
             else if (tuple.Item2 == TileRelativeTo.End && tuple.Item1 <= sequenceId)
-                levelEvent.data[key] = new Tuple<int, TileRelativeTo>(tuple.Item1 - 1, TileRelativeTo.End);
+                eventData[key] = new Tuple<int, TileRelativeTo>(tuple.Item1 - 1, TileRelativeTo.End);
         }
 
         private static void TryCompleteSyncTarget(CollaborationController controller, WebSocketTransport transport)
@@ -647,6 +637,15 @@ namespace EditorTogether
         private static float GetFloat(Dictionary<string, object> dictionary, string key)
             => dictionary.TryGetValue(key, out object value) ? Convert.ToSingle(value, CultureInfo.InvariantCulture) : 0f;
 
+        private static Dictionary<string, object> GetEventData(LevelEvent evnt)
+        {
+            if (evnt == null) throw new ArgumentNullException(nameof(evnt));
+            if (LevelEventDataField == null) throw new MissingFieldException(typeof(LevelEvent).FullName, "data");
+            var data = LevelEventDataField.GetValue(evnt) as Dictionary<string, object>;
+            if (data == null) throw new InvalidOperationException("LevelEvent.data was unavailable or had an unexpected type.");
+            return data;
+        }
+
         private sealed class EditorStateCapture
         {
             public bool IsOldLevel;
@@ -766,10 +765,7 @@ namespace EditorTogether
                     }
                     AddAngleUpdates(transformed.ToArray(), newValues, result);
                 }
-                else
-                {
-                    AddAngleUpdates(oldValues, newValues, result);
-                }
+                else AddAngleUpdates(oldValues, newValues, result);
             }
 
             private static void AddAngleUpdates(float[] oldValues, float[] newValues, OperationDiffResult result)
@@ -781,10 +777,8 @@ namespace EditorTogether
                     return;
                 }
                 for (int i = 0; i < oldValues.Length; i++)
-                {
                     if (Math.Abs(oldValues[i] - newValues[i]) > 0.0001f)
                         result.Operations.Add(new Dictionary<string, object> { ["op"] = "set-angle", ["index"] = i, ["angle"] = newValues[i] });
-                }
             }
 
             private static void DiffCharFloors(string oldValues, string newValues, List<EventSnapshot> events, List<EventSnapshot> decorations, OperationDiffResult result)
@@ -842,8 +836,7 @@ namespace EditorTogether
 
                 if (newList.Count == oldList.Count)
                 {
-                    for (int i = 0; i < oldList.Count; i++)
-                        AddEventUpdateIfNeeded(oldList[i], newList[i], i, updateOp, result);
+                    for (int i = 0; i < oldList.Count; i++) AddEventUpdateIfNeeded(oldList[i], newList[i], i, updateOp, result);
                     return;
                 }
 
@@ -861,12 +854,7 @@ namespace EditorTogether
                     for (int i = 0; i < added; i++)
                     {
                         int index = insertion + i;
-                        result.Operations.Add(new Dictionary<string, object>
-                        {
-                            ["op"] = addOp,
-                            ["index"] = index,
-                            ["event"] = EventCodec.Encode(newList[index].Event)
-                        });
+                        result.Operations.Add(new Dictionary<string, object> { ["op"] = addOp, ["index"] = index, ["event"] = EventCodec.Encode(newList[index].Event) });
                     }
                     return;
                 }
@@ -881,14 +869,7 @@ namespace EditorTogether
                 }
 
                 for (int i = 0; i < removed; i++)
-                {
-                    result.Operations.Add(new Dictionary<string, object>
-                    {
-                        ["op"] = removeOp,
-                        ["index"] = removal,
-                        ["expectedHash"] = oldList[removal + i].Hash
-                    });
-                }
+                    result.Operations.Add(new Dictionary<string, object> { ["op"] = removeOp, ["index"] = removal, ["expectedHash"] = oldList[removal + i].Hash });
             }
 
             private static int FindPureInsertion(List<EventSnapshot> oldList, List<EventSnapshot> newList, int added)
@@ -1006,8 +987,9 @@ namespace EditorTogether
             public static Dictionary<string, object> Encode(LevelEvent evnt)
             {
                 if (evnt == null) throw new InvalidOperationException("Cannot encode null event");
+                Dictionary<string, object> sourceData = GetEventData(evnt);
                 var data = new Dictionary<string, object>();
-                foreach (string key in evnt.data.Keys.OrderBy(x => x, StringComparer.Ordinal)) data[key] = EncodeValue(evnt.data[key]);
+                foreach (string key in sourceData.Keys.OrderBy(x => x, StringComparer.Ordinal)) data[key] = EncodeValue(sourceData[key]);
                 var disabled = new Dictionary<string, object>();
                 foreach (string key in evnt.disabled.Keys.OrderBy(x => x, StringComparer.Ordinal)) disabled[key] = evnt.disabled[key];
                 return new Dictionary<string, object>
@@ -1025,13 +1007,14 @@ namespace EditorTogether
                 string typeName = encoded.TryGetValue("eventType", out object typeObj) ? Convert.ToString(typeObj, CultureInfo.InvariantCulture) : "None";
                 if (!Enum.TryParse(typeName, true, out LevelEventType eventType)) throw new InvalidOperationException("Unknown LevelEventType: " + typeName);
                 var evnt = new LevelEvent(floor, eventType);
+                Dictionary<string, object> targetData = GetEventData(evnt);
 
                 if (encoded.TryGetValue("data", out object dataObj) && dataObj is Dictionary<string, object> data)
                 {
                     foreach (var pair in data)
                     {
-                        Type expected = evnt.data.TryGetValue(pair.Key, out object current) && current != null ? current.GetType() : null;
-                        evnt.data[pair.Key] = DecodeValue(pair.Value, expected);
+                        Type expected = targetData.TryGetValue(pair.Key, out object current) && current != null ? current.GetType() : null;
+                        targetData[pair.Key] = DecodeValue(pair.Value, expected);
                     }
                 }
 
