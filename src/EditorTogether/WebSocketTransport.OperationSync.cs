@@ -58,10 +58,26 @@ namespace EditorTogether
             });
         }
 
-        public bool TryDequeueOperationBatch(out OperationBatchMessage message) => incomingOperationBatches.TryDequeue(out message);
+        // During join/resync the full snapshot must be consumed by CollaborationController
+        // before the replay log/target is exposed to OperationSyncManager. Otherwise an
+        // editor Update can observe the target first and then clear the queued replay when
+        // the levelId changes on the next frame.
+        public bool TryDequeueOperationBatch(out OperationBatchMessage message)
+        {
+            message = null;
+            if (!incoming.IsEmpty) return false;
+            return incomingOperationBatches.TryDequeue(out message);
+        }
+
         public bool TryDequeueOperationAck(out OperationAckMessage message) => incomingOperationAcks.TryDequeue(out message);
         public bool TryDequeueOperationRejected(out OperationRejectedMessage message) => incomingOperationRejected.TryDequeue(out message);
-        public bool TryDequeueSyncTarget(out SyncTargetMessage message) => incomingSyncTargets.TryDequeue(out message);
+
+        public bool TryDequeueSyncTarget(out SyncTargetMessage message)
+        {
+            message = null;
+            if (!incoming.IsEmpty) return false;
+            return incomingSyncTargets.TryDequeue(out message);
+        }
 
         private bool TryHandleOperationEnvelope(Dictionary<string, object> json, string type, string clientId, string levelId)
         {
