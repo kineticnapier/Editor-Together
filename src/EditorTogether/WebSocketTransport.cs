@@ -74,12 +74,20 @@ namespace EditorTogether
         {
             if (IsConnected) return;
             CleanupSocket();
-            connectedUri = new Uri(url);
+            string protocolUrl = AddProtocolQuery(url);
+            connectedUri = new Uri(protocolUrl);
             socket = new ClientWebSocket();
             cancellation = new CancellationTokenSource();
             await socket.ConnectAsync(connectedUri, cancellation.Token).ConfigureAwait(false);
-            logger.Log($"[Collab] connected to {url} as {ClientId}");
+            logger.Log($"[Collab] connected to {protocolUrl} as {ClientId}");
             _ = Task.Run(ReceiveLoopAsync);
+        }
+
+        private static string AddProtocolQuery(string url)
+        {
+            string value = url ?? string.Empty;
+            if (value.IndexOf("protocol=", StringComparison.OrdinalIgnoreCase) >= 0) return value;
+            return value + (value.Contains("?") ? "&" : "?") + "protocol=" + OperationSyncManager.ProtocolVersion;
         }
 
         public Task SendSnapshotAsync(long revision, string levelId, string levelData, bool levelSwitch)
@@ -326,7 +334,7 @@ namespace EditorTogether
             ClientId = clientId;
             DisplayName = displayName ?? string.Empty;
             IsHost = isHost;
-            IsLeaving = leaving;
+            IsLeaving = isLeaving;
             LevelId = levelId;
             SelectedFloors = selectedFloors ?? Array.Empty<int>();
         }
