@@ -21,6 +21,7 @@ namespace EditorTogether
         private readonly HttpClient http = new HttpClient();
         private readonly CancellationTokenSource cancellation = new CancellationTokenSource();
         private readonly ConcurrentQueue<string> completedLevels = new ConcurrentQueue<string>();
+        private readonly ConcurrentDictionary<string, byte> readyLevels = new ConcurrentDictionary<string, byte>();
         private readonly string rootDirectory;
         private readonly string contentCacheDirectory;
         private readonly string sessionDirectory;
@@ -112,6 +113,7 @@ namespace EditorTogether
         {
             if (manifest == null || string.IsNullOrEmpty(manifest.LevelId)) return;
             latestRemoteLevelId = manifest.LevelId;
+            readyLevels.TryRemove(manifest.LevelId, out _);
             _ = DownloadManifestAsync(manifest);
         }
 
@@ -123,6 +125,7 @@ namespace EditorTogether
                 if (assets.Length == 0)
                 {
                     status = "Assets: none";
+                    readyLevels[manifest.LevelId] = 1;
                     completedLevels.Enqueue(manifest.LevelId);
                     return;
                 }
@@ -154,6 +157,7 @@ namespace EditorTogether
 
                 if (latestRemoteLevelId != manifest.LevelId) return;
                 status = $"Assets: ready ({assets.Length})";
+                readyLevels[manifest.LevelId] = 1;
                 completedLevels.Enqueue(manifest.LevelId);
                 logger.Log($"[CollabAssets] assets ready; level={manifest.LevelId}, assets={assets.Length}");
             }
@@ -166,6 +170,7 @@ namespace EditorTogether
         }
 
         public bool TryDequeueCompleted(out string levelId) => completedLevels.TryDequeue(out levelId);
+        public bool IsLevelReady(string levelId) => !string.IsNullOrEmpty(levelId) && readyLevels.ContainsKey(levelId);
 
         public string PrepareRemoteLevel(string levelId, string encodedLevel)
         {
@@ -181,6 +186,7 @@ namespace EditorTogether
             latestHostLevelId = string.Empty;
             latestRemoteLevelId = string.Empty;
             status = "Idle";
+            readyLevels.Clear();
             while (completedLevels.TryDequeue(out _)) { }
         }
 
