@@ -214,7 +214,7 @@ namespace EditorTogether.Patches
 
                 Mix(ref hash, evnt.floor);
                 Mix(ref hash, evnt.eventType.GetHashCode());
-                Mix(ref hash, evnt.disabled ? 1 : 0);
+                MixValue(ref hash, evnt.disabled, 0);
 
                 Dictionary<string, object> data = null;
                 try { data = LevelEventDataField?.GetValue(evnt) as Dictionary<string, object>; }
