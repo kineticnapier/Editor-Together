@@ -8,7 +8,7 @@ namespace EditorTogether.Patches
         [HarmonyPostfix]
         private static void Postfix(scnEditor __instance, bool clearRedo = true, bool dataHasChanged = true)
         {
-            if (__instance == null || !dataHasChanged) return;
+            if (__instance == null) return;
             Main.Controller?.OnEditorStateSaved(__instance);
         }
     }
