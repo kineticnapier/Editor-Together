@@ -1,3 +1,4 @@
+using System;
 using System.Reflection;
 using HarmonyLib;
 
@@ -9,11 +10,8 @@ namespace EditorTogether.Patches
         [HarmonyPrefix]
         private static void Prefix(scnEditor __instance, bool clearRedo = true, bool dataHasChanged = true)
         {
-            // Some editor paths/mods call SaveState(..., dataHasChanged: false) and then
-            // mutate LevelData anyway. saveStateLastFrame still advances, so the legacy
-            // observer notices the edit, but OperationSync previously skipped its pre-edit
-            // capture and then suppressed that legacy snapshot. Capture every SaveState;
-            // a true no-op simply produces an empty diff at LateUpdate.
+            // Keep the direct SaveState hook as a compatibility path. Stock editor edits
+            // primarily go through SaveStateScope, which is patched separately.
             OperationSyncManager.CaptureBeforeMutation(__instance, true);
         }
     }
@@ -21,10 +19,7 @@ namespace EditorTogether.Patches
     [HarmonyPatch]
     internal static class OperationSyncEditorUpdatePatch
     {
-        // Run after all normal Update work (including Unity UI callbacks) has had a chance
-        // to mutate LevelData. Running this from scnEditor.Update could flush the SaveState
-        // pre-edit capture before a button/inspector callback actually changed the chart,
-        // producing a zero-op diff and suppressing the legacy fallback snapshot.
+        // Flush after the editor frame has finished mutating LevelData.
         private static MethodBase TargetMethod() => AccessTools.Method(typeof(scnEditor), "LateUpdate");
 
         [HarmonyPostfix]
@@ -38,12 +33,55 @@ namespace EditorTogether.Patches
     [HarmonyPatch]
     internal static class OperationSyncLegacySnapshotPatch
     {
+        private static readonly FieldInfo MutationSerialField = AccessTools.Field(typeof(OperationSyncManager), "mutationSerial");
+        private static readonly FieldInfo HandledMutationSerialField = AccessTools.Field(typeof(OperationSyncManager), "handledMutationSerial");
+        private static string trackedLevelId = string.Empty;
+        private static int lastObservedMutation = -1;
+        private static int lastSuppressedMutation = -1;
+
         private static MethodBase TargetMethod() => AccessTools.Method(typeof(CollaborationController), "PublishSnapshot");
 
         [HarmonyPrefix]
         private static bool Prefix(scnEditor editor, bool levelSwitch = false)
         {
-            return OperationSyncManager.AllowLegacySnapshot(editor, levelSwitch);
+            CollaborationController controller = Main.Controller;
+            if (levelSwitch || controller == null || !controller.IsConnected)
+            {
+                if (levelSwitch) Reset(controller?.LevelId);
+                return true;
+            }
+
+            // Safety rule: a legacy snapshot is suppressed only once for a mutation that
+            // OperationSync has positively finished handling. The old 0 == 0 test blocked
+            // every snapshot when no operation capture happened at all.
+            int mutation = ReadInt(MutationSerialField);
+            int handled = ReadInt(HandledMutationSerialField);
+            string levelId = controller.LevelId ?? string.Empty;
+
+            if (!string.Equals(levelId, trackedLevelId, StringComparison.Ordinal) || mutation < lastObservedMutation)
+                Reset(levelId);
+
+            lastObservedMutation = mutation;
+            if (mutation > 0 && handled == mutation && handled != lastSuppressedMutation)
+            {
+                lastSuppressedMutation = handled;
+                return false;
+            }
+
+            return true;
+        }
+
+        private static int ReadInt(FieldInfo field)
+        {
+            try { return field == null ? -1 : (int)field.GetValue(null); }
+            catch { return -1; }
+        }
+
+        private static void Reset(string levelId)
+        {
+            trackedLevelId = levelId ?? string.Empty;
+            lastObservedMutation = -1;
+            lastSuppressedMutation = -1;
         }
     }
 }
