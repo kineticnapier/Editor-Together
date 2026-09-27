@@ -3,6 +3,9 @@ using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text.Json;
 
+const int ProtocolVersion = 2;
+const int MaxOperationsPerBatch = 64;
+const int MaxOperationBatchBytes = 64 * 1024;
 const long MaxAssetBytes = 1024L * 1024L * 1024L;
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = MaxAssetBytes);
@@ -13,7 +16,7 @@ if (string.IsNullOrWhiteSpace(assetRoot)) assetRoot = Path.Combine(AppContext.Ba
 Directory.CreateDirectory(assetRoot);
 
 app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
-app.MapGet("/", () => Results.Text("EditorTogether.Server is running."));
+app.MapGet("/", () => Results.Text($"EditorTogether.Server is running. protocol={ProtocolVersion}"));
 
 app.MapMethods("/assets/{hash}", new[] { "HEAD" }, (string hash) =>
 {
@@ -75,21 +78,41 @@ app.MapPut("/assets/{hash}", async (HttpContext context, string hash) =>
 
 app.Map("/ws", async context =>
 {
-    if (!context.WebSockets.IsWebSocketRequest) { context.Response.StatusCode = 400; await context.Response.WriteAsync("WebSocket required."); return; }
-    var roomName = context.Request.Query["room"].ToString(); if (string.IsNullOrWhiteSpace(roomName)) roomName = "default";
+    if (!context.WebSockets.IsWebSocketRequest)
+    {
+        context.Response.StatusCode = 400;
+        await context.Response.WriteAsync("WebSocket required.");
+        return;
+    }
+
+    if (!int.TryParse(context.Request.Query["protocol"], out int requestedProtocol) || requestedProtocol != ProtocolVersion)
+    {
+        context.Response.StatusCode = StatusCodes.Status426UpgradeRequired;
+        await context.Response.WriteAsync($"Protocol mismatch. server={ProtocolVersion}");
+        return;
+    }
+
+    var roomName = context.Request.Query["room"].ToString();
+    if (string.IsNullOrWhiteSpace(roomName)) roomName = "default";
     bool wantsHost = string.Equals(context.Request.Query["role"], "host", StringComparison.OrdinalIgnoreCase);
-    bool explicitSync = string.Equals(context.Request.Query["sync"], "explicit", StringComparison.OrdinalIgnoreCase);
 
     RoomState room;
     if (wantsHost)
     {
         var fresh = new RoomState();
-        if (!rooms.TryAdd(roomName, fresh)) { context.Response.StatusCode = 409; await context.Response.WriteAsync("Room already exists."); return; }
+        if (!rooms.TryAdd(roomName, fresh))
+        {
+            context.Response.StatusCode = 409;
+            await context.Response.WriteAsync("Room already exists.");
+            return;
+        }
         room = fresh;
     }
     else if (!rooms.TryGetValue(roomName, out room))
     {
-        context.Response.StatusCode = 404; await context.Response.WriteAsync("Room does not exist."); return;
+        context.Response.StatusCode = 404;
+        await context.Response.WriteAsync("Room does not exist.");
+        return;
     }
 
     var socket = await context.WebSockets.AcceptWebSocketAsync();
@@ -97,45 +120,66 @@ app.Map("/ws", async context =>
     room.Clients[connectionId] = socket;
     room.ClientCanPublish[connectionId] = wantsHost;
     if (wantsHost) room.HostConnectionId = connectionId;
-    Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] + {connectionId:N} room={roomName} role={(wantsHost ? "host" : "client")} sync={(explicitSync ? "explicit" : "legacy")} clients={room.Clients.Count}");
-
-    // Legacy clients still receive the initial state so they can observe a room, but they
-    // remain read-only until they perform the v2 sync-request/sync-ready handshake.
-    if (!wantsHost && !explicitSync && socket.State == WebSocketState.Open)
-    {
-        byte[]? initialSnapshot;
-        byte[]? initialAssetManifest;
-        lock (room.Sync)
-        {
-            initialSnapshot = room.LatestSnapshot;
-            initialAssetManifest = room.LatestAssetManifest;
-        }
-        if (initialSnapshot != null)
-            await socket.SendAsync(new ArraySegment<byte>(initialSnapshot), WebSocketMessageType.Text, true, context.RequestAborted);
-        if (initialAssetManifest != null)
-            await socket.SendAsync(new ArraySegment<byte>(initialAssetManifest), WebSocketMessageType.Text, true, context.RequestAborted);
-    }
+    Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] + {connectionId:N} room={roomName} role={(wantsHost ? "host" : "client")} protocol={ProtocolVersion} clients={room.Clients.Count}");
 
     var buffer = new byte[64 * 1024];
     try
     {
         while (socket.State == WebSocketState.Open)
         {
-            using var message = new MemoryStream(); WebSocketReceiveResult result;
-            do { result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), context.RequestAborted); if (result.MessageType == WebSocketMessageType.Close) break; await message.WriteAsync(buffer.AsMemory(0, result.Count), context.RequestAborted); } while (!result.EndOfMessage);
+            using var message = new MemoryStream();
+            WebSocketReceiveResult result;
+            do
+            {
+                result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), context.RequestAborted);
+                if (result.MessageType == WebSocketMessageType.Close) break;
+                await message.WriteAsync(buffer.AsMemory(0, result.Count), context.RequestAborted);
+            } while (!result.EndOfMessage);
+
             if (result.MessageType == WebSocketMessageType.Close) break;
             if (result.MessageType != WebSocketMessageType.Text) continue;
             var payload = message.ToArray();
 
-            string type = "";
-            string messageLevelId = "";
+            string type = string.Empty;
+            string messageLevelId = string.Empty;
+            string messageClientId = string.Empty;
+            string batchId = string.Empty;
+            string levelData = string.Empty;
+            long messageRevision = 0;
+            long baseRevision = 0;
+            int messageProtocol = 0;
+            JsonElement operations = default;
+            bool hasOperations = false;
+
             try
             {
                 using var json = JsonDocument.Parse(payload);
-                if (json.RootElement.TryGetProperty("type", out var typeElement)) type = typeElement.GetString() ?? "";
-                if (json.RootElement.TryGetProperty("levelId", out var levelElement)) messageLevelId = levelElement.GetString() ?? "";
+                var root = json.RootElement;
+                if (root.TryGetProperty("type", out var typeElement)) type = typeElement.GetString() ?? string.Empty;
+                if (root.TryGetProperty("levelId", out var levelElement)) messageLevelId = levelElement.GetString() ?? string.Empty;
+                if (root.TryGetProperty("clientId", out var clientElement)) messageClientId = clientElement.GetString() ?? string.Empty;
+                if (root.TryGetProperty("batchId", out var batchElement)) batchId = batchElement.GetString() ?? string.Empty;
+                if (root.TryGetProperty("levelData", out var dataElement)) levelData = dataElement.GetString() ?? string.Empty;
+                if (root.TryGetProperty("revision", out var revisionElement) && revisionElement.TryGetInt64(out long parsedRevision)) messageRevision = parsedRevision;
+                if (root.TryGetProperty("baseRevision", out var baseElement) && baseElement.TryGetInt64(out long parsedBase)) baseRevision = parsedBase;
+                if (root.TryGetProperty("protocolVersion", out var protocolElement) && protocolElement.TryGetInt32(out int parsedProtocol)) messageProtocol = parsedProtocol;
+                if (root.TryGetProperty("ops", out var opsElement))
+                {
+                    operations = opsElement.Clone();
+                    hasOperations = true;
+                }
             }
-            catch { }
+            catch
+            {
+                await SendBytesAsync(socket, ProtocolError("Malformed JSON message."), context.RequestAborted);
+                continue;
+            }
+
+            if (messageProtocol != ProtocolVersion)
+            {
+                await SendBytesAsync(socket, ProtocolError($"Protocol mismatch. server={ProtocolVersion} client={messageProtocol}"), context.RequestAborted);
+                continue;
+            }
 
             if (type == "sync-request")
             {
@@ -143,17 +187,23 @@ app.Map("/ws", async context =>
                 room.ClientCanPublish[connectionId] = false;
                 byte[]? snapshot;
                 byte[]? manifest;
+                byte[][] opLog;
+                string targetLevel;
+                long targetRevision;
                 lock (room.Sync)
                 {
                     snapshot = room.LatestSnapshot;
                     manifest = room.LatestAssetManifest;
+                    opLog = room.OperationLog.ToArray();
+                    targetLevel = room.CurrentLevelId;
+                    targetRevision = room.CurrentRevision;
                 }
 
-                Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] sync -> {connectionId:N} room={roomName} snapshot={(snapshot != null)} assets={(manifest != null)}");
-                if (snapshot != null && socket.State == WebSocketState.Open)
-                    await socket.SendAsync(new ArraySegment<byte>(snapshot), WebSocketMessageType.Text, true, context.RequestAborted);
-                if (manifest != null && socket.State == WebSocketState.Open)
-                    await socket.SendAsync(new ArraySegment<byte>(manifest), WebSocketMessageType.Text, true, context.RequestAborted);
+                Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] sync -> {connectionId:N} room={roomName} snapshot={(snapshot != null)} ops={opLog.Length} target={targetRevision} assets={(manifest != null)}");
+                if (snapshot != null && socket.State == WebSocketState.Open) await SendBytesAsync(socket, snapshot, context.RequestAborted);
+                if (manifest != null && socket.State == WebSocketState.Open) await SendBytesAsync(socket, manifest, context.RequestAborted);
+                for (int i = 0; i < opLog.Length && socket.State == WebSocketState.Open; i++) await SendBytesAsync(socket, opLog[i], context.RequestAborted);
+                if (!string.IsNullOrEmpty(targetLevel) && socket.State == WebSocketState.Open) await SendBytesAsync(socket, SyncTarget(targetLevel, targetRevision), context.RequestAborted);
                 continue;
             }
 
@@ -161,14 +211,123 @@ app.Map("/ws", async context =>
             {
                 if (wantsHost) continue;
                 bool matches;
+                string targetLevel;
+                long targetRevision;
                 lock (room.Sync)
-                    matches = !string.IsNullOrEmpty(room.CurrentLevelId) && string.Equals(messageLevelId, room.CurrentLevelId, StringComparison.Ordinal);
+                {
+                    targetLevel = room.CurrentLevelId;
+                    targetRevision = room.CurrentRevision;
+                    matches = !string.IsNullOrEmpty(targetLevel) &&
+                              string.Equals(messageLevelId, targetLevel, StringComparison.Ordinal) &&
+                              messageRevision == targetRevision;
+                }
                 room.ClientCanPublish[connectionId] = matches;
-                Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] sync-ready {connectionId:N} room={roomName} level={messageLevelId} accepted={matches}");
+                Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] sync-ready {connectionId:N} room={roomName} level={messageLevelId} revision={messageRevision} accepted={matches}");
+                if (!matches && !string.IsNullOrEmpty(targetLevel) && socket.State == WebSocketState.Open)
+                    await SendBytesAsync(socket, SyncTarget(targetLevel, targetRevision), context.RequestAborted);
+                continue;
+            }
+
+            if (type == "ops")
+            {
+                bool canPublish = wantsHost || (room.ClientCanPublish.TryGetValue(connectionId, out bool enabled) && enabled);
+                string rejectReason = string.Empty;
+                long serverRevision;
+                long acceptedRevision = 0;
+                byte[]? authoritative = null;
+
+                lock (room.Sync)
+                {
+                    serverRevision = room.CurrentRevision;
+                    if (!canPublish) rejectReason = "sync-barrier";
+                    else if (string.IsNullOrEmpty(room.CurrentLevelId) || !string.Equals(messageLevelId, room.CurrentLevelId, StringComparison.Ordinal)) rejectReason = "level-mismatch";
+                    else if (baseRevision != room.CurrentRevision) rejectReason = "revision-mismatch";
+                    else if (!hasOperations || operations.ValueKind != JsonValueKind.Array || operations.GetArrayLength() == 0) rejectReason = "empty-ops";
+                    else if (operations.GetArrayLength() > MaxOperationsPerBatch || payload.Length > MaxOperationBatchBytes) rejectReason = "batch-too-large";
+                    else
+                    {
+                        acceptedRevision = room.CurrentRevision + 1;
+                        authoritative = OperationEnvelope(messageClientId, room.CurrentLevelId, baseRevision, acceptedRevision, batchId, operations);
+                        room.CurrentRevision = acceptedRevision;
+                        room.OperationLog.Add(authoritative);
+                        serverRevision = acceptedRevision;
+                    }
+                }
+
+                if (authoritative == null)
+                {
+                    Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] ! ops rejected room={roomName} reason={rejectReason} base={baseRevision} current={serverRevision}");
+                    await SendBytesAsync(socket, OperationRejected(batchId, rejectReason, serverRevision), context.RequestAborted);
+                    continue;
+                }
+
+                await SendBytesAsync(socket, OperationAck(batchId, acceptedRevision), context.RequestAborted);
+                await BroadcastAsync(room, connectionId, authoritative, context.RequestAborted);
+                Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] ops room={roomName} revision={acceptedRevision} bytes={authoritative.Length}");
+                continue;
+            }
+
+            if (type == "full-state")
+            {
+                bool canPublish = wantsHost || (room.ClientCanPublish.TryGetValue(connectionId, out bool enabled) && enabled);
+                string rejectReason = string.Empty;
+                long serverRevision;
+                long acceptedRevision = 0;
+                byte[]? snapshot = null;
+
+                lock (room.Sync)
+                {
+                    serverRevision = room.CurrentRevision;
+                    if (!canPublish) rejectReason = "sync-barrier";
+                    else if (string.IsNullOrEmpty(room.CurrentLevelId) || !string.Equals(messageLevelId, room.CurrentLevelId, StringComparison.Ordinal)) rejectReason = "level-mismatch";
+                    else if (baseRevision != room.CurrentRevision) rejectReason = "revision-mismatch";
+                    else if (string.IsNullOrEmpty(levelData)) rejectReason = "empty-state";
+                    else
+                    {
+                        acceptedRevision = room.CurrentRevision + 1;
+                        snapshot = SnapshotEnvelope(messageClientId, room.CurrentLevelId, acceptedRevision, levelData, false);
+                        room.CurrentRevision = acceptedRevision;
+                        room.LatestSnapshot = snapshot;
+                        room.OperationLog.Clear();
+                        serverRevision = acceptedRevision;
+                    }
+                }
+
+                if (snapshot == null)
+                {
+                    await SendBytesAsync(socket, OperationRejected(batchId, rejectReason, serverRevision), context.RequestAborted);
+                    continue;
+                }
+
+                await SendBytesAsync(socket, OperationAck(batchId, acceptedRevision), context.RequestAborted);
+                await BroadcastAsync(room, connectionId, snapshot, context.RequestAborted);
+                Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] full-state room={roomName} revision={acceptedRevision} bytes={snapshot.Length}");
+                continue;
+            }
+
+            if (type == "checkpoint")
+            {
+                bool accepted = false;
+                if (wantsHost && !string.IsNullOrEmpty(levelData))
+                {
+                    lock (room.Sync)
+                    {
+                        if (string.Equals(messageLevelId, room.CurrentLevelId, StringComparison.Ordinal) && messageRevision == room.CurrentRevision)
+                        {
+                            room.LatestSnapshot = SnapshotEnvelope(messageClientId, room.CurrentLevelId, room.CurrentRevision, levelData, false);
+                            room.OperationLog.Clear();
+                            accepted = true;
+                        }
+                    }
+                }
+                Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] checkpoint room={roomName} revision={messageRevision} accepted={accepted}");
                 continue;
             }
 
             bool relay = true;
+            bool sendTargetAfterRelay = false;
+            byte[] relayPayload = payload;
+
             if (type == "level-switch")
             {
                 if (!wantsHost)
@@ -181,33 +340,33 @@ app.Map("/ws", async context =>
                     lock (room.Sync)
                     {
                         room.CurrentLevelId = messageLevelId;
+                        room.CurrentRevision = messageRevision;
                         room.LatestSnapshot = payload;
                         room.LatestAssetManifest = null;
+                        room.OperationLog.Clear();
                     }
+                    foreach (var peerId in room.Clients.Keys)
+                        if (peerId != connectionId) room.ClientCanPublish[peerId] = false;
+                    sendTargetAfterRelay = true;
                 }
             }
             else if (type == "snapshot")
             {
-                if (!wantsHost)
+                bool canPublish = wantsHost || (room.ClientCanPublish.TryGetValue(connectionId, out bool enabled) && enabled);
+                lock (room.Sync)
                 {
-                    bool canPublish = room.ClientCanPublish.TryGetValue(connectionId, out bool enabled) && enabled;
-                    string currentLevelId;
-                    lock (room.Sync) currentLevelId = room.CurrentLevelId;
-                    if (!canPublish || string.IsNullOrEmpty(currentLevelId) || !string.Equals(messageLevelId, currentLevelId, StringComparison.Ordinal))
+                    if (!canPublish || string.IsNullOrEmpty(room.CurrentLevelId) || !string.Equals(messageLevelId, room.CurrentLevelId, StringComparison.Ordinal) || messageRevision != room.CurrentRevision + 1)
                     {
                         relay = false;
-                        Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] ! blocked unsafe client snapshot room={roomName} canPublish={canPublish} messageLevel={messageLevelId} currentLevel={currentLevelId}");
                     }
-                }
-
-                if (relay)
-                {
-                    lock (room.Sync)
+                    else
                     {
-                        if (string.IsNullOrEmpty(room.CurrentLevelId)) room.CurrentLevelId = messageLevelId;
+                        room.CurrentRevision = messageRevision;
                         room.LatestSnapshot = payload;
+                        room.OperationLog.Clear();
                     }
                 }
+                if (!relay) Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] ! blocked legacy snapshot room={roomName} level={messageLevelId} revision={messageRevision}");
             }
             else if (type == "asset-manifest")
             {
@@ -227,10 +386,14 @@ app.Map("/ws", async context =>
             Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] > {connectionId:N} room={roomName} type={type} bytes={payload.Length}");
             if (!relay) continue;
 
-            foreach (var peer in room.Clients.ToArray())
+            await BroadcastAsync(room, connectionId, relayPayload, context.RequestAborted);
+            if (sendTargetAfterRelay)
             {
-                if (peer.Key == connectionId || peer.Value.State != WebSocketState.Open) continue;
-                try { await peer.Value.SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Text, true, context.RequestAborted); } catch { }
+                string targetLevel;
+                long targetRevision;
+                lock (room.Sync) { targetLevel = room.CurrentLevelId; targetRevision = room.CurrentRevision; }
+                if (!string.IsNullOrEmpty(targetLevel))
+                    await BroadcastAsync(room, connectionId, SyncTarget(targetLevel, targetRevision), context.RequestAborted);
             }
         }
     }
@@ -254,11 +417,16 @@ app.Map("/ws", async context =>
             lock (room.Sync)
             {
                 room.CurrentLevelId = string.Empty;
+                room.CurrentRevision = 0;
                 room.LatestSnapshot = null;
                 room.LatestAssetManifest = null;
+                room.OperationLog.Clear();
             }
         }
-        if (socket.State is WebSocketState.Open or WebSocketState.CloseReceived) { try { await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None); } catch { } }
+        if (socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
+        {
+            try { await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None); } catch { }
+        }
         socket.Dispose();
         Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] - {connectionId:N} room={roomName} clients={room.Clients.Count}");
     }
@@ -267,6 +435,74 @@ app.Map("/ws", async context =>
 app.Run("http://0.0.0.0:38241");
 
 string AssetPath(string hash) => Path.Combine(assetRoot!, hash.ToLowerInvariant());
+
+static Task SendBytesAsync(WebSocket socket, byte[] payload, CancellationToken token)
+    => socket.SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Text, true, token);
+
+static async Task BroadcastAsync(RoomState room, Guid sourceConnectionId, byte[] payload, CancellationToken token)
+{
+    foreach (var peer in room.Clients.ToArray())
+    {
+        if (peer.Key == sourceConnectionId || peer.Value.State != WebSocketState.Open) continue;
+        try { await SendBytesAsync(peer.Value, payload, token); } catch { }
+    }
+}
+
+static byte[] ProtocolError(string message) => JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, object?>
+{
+    ["type"] = "protocol-error",
+    ["protocolVersion"] = ProtocolVersion,
+    ["message"] = message
+});
+
+static byte[] OperationAck(string batchId, long revision) => JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, object?>
+{
+    ["type"] = "ops-ack",
+    ["protocolVersion"] = ProtocolVersion,
+    ["batchId"] = batchId,
+    ["revision"] = revision
+});
+
+static byte[] OperationRejected(string batchId, string reason, long serverRevision) => JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, object?>
+{
+    ["type"] = "ops-rejected",
+    ["protocolVersion"] = ProtocolVersion,
+    ["batchId"] = batchId,
+    ["reason"] = reason,
+    ["serverRevision"] = serverRevision
+});
+
+static byte[] SyncTarget(string levelId, long revision) => JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, object?>
+{
+    ["type"] = "sync-target",
+    ["protocolVersion"] = ProtocolVersion,
+    ["levelId"] = levelId,
+    ["revision"] = revision
+});
+
+static byte[] OperationEnvelope(string clientId, string levelId, long baseRevision, long revision, string batchId, JsonElement operations)
+    => JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, object?>
+    {
+        ["type"] = "ops",
+        ["protocolVersion"] = ProtocolVersion,
+        ["clientId"] = clientId,
+        ["levelId"] = levelId,
+        ["baseRevision"] = baseRevision,
+        ["revision"] = revision,
+        ["batchId"] = batchId,
+        ["ops"] = operations
+    });
+
+static byte[] SnapshotEnvelope(string clientId, string levelId, long revision, string levelData, bool levelSwitch)
+    => JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, object?>
+    {
+        ["type"] = levelSwitch ? "level-switch" : "snapshot",
+        ["protocolVersion"] = ProtocolVersion,
+        ["clientId"] = clientId,
+        ["levelId"] = levelId,
+        ["revision"] = revision,
+        ["levelData"] = levelData
+    });
 
 static bool IsValidSha256(string value)
 {
@@ -286,6 +522,8 @@ sealed class RoomState
     public object Sync { get; } = new();
     public Guid HostConnectionId { get; set; }
     public string CurrentLevelId { get; set; } = string.Empty;
+    public long CurrentRevision { get; set; }
     public byte[]? LatestSnapshot { get; set; }
     public byte[]? LatestAssetManifest { get; set; }
+    public List<byte[]> OperationLog { get; } = new();
 }
