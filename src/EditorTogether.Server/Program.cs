@@ -78,6 +78,7 @@ app.Map("/ws", async context =>
     if (!context.WebSockets.IsWebSocketRequest) { context.Response.StatusCode = 400; await context.Response.WriteAsync("WebSocket required."); return; }
     var roomName = context.Request.Query["room"].ToString(); if (string.IsNullOrWhiteSpace(roomName)) roomName = "default";
     bool wantsHost = string.Equals(context.Request.Query["role"], "host", StringComparison.OrdinalIgnoreCase);
+    bool explicitSync = string.Equals(context.Request.Query["sync"], "explicit", StringComparison.OrdinalIgnoreCase);
 
     RoomState room;
     if (wantsHost)
@@ -94,18 +95,21 @@ app.Map("/ws", async context =>
     var socket = await context.WebSockets.AcceptWebSocketAsync();
     var connectionId = Guid.NewGuid();
     room.Clients[connectionId] = socket;
+    room.ClientCanPublish[connectionId] = wantsHost;
     if (wantsHost) room.HostConnectionId = connectionId;
-    Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] + {connectionId:N} room={roomName} role={(wantsHost ? "host" : "client")} clients={room.Clients.Count}");
+    Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] + {connectionId:N} room={roomName} role={(wantsHost ? "host" : "client")} sync={(explicitSync ? "explicit" : "legacy")} clients={room.Clients.Count}");
 
-    byte[]? initialSnapshot;
-    byte[]? initialAssetManifest;
-    lock (room.Sync)
+    // Legacy clients still receive the initial state so they can observe a room, but they
+    // remain read-only until they perform the v2 sync-request/sync-ready handshake.
+    if (!wantsHost && !explicitSync && socket.State == WebSocketState.Open)
     {
-        initialSnapshot = room.LatestSnapshot;
-        initialAssetManifest = room.LatestAssetManifest;
-    }
-    if (!wantsHost && socket.State == WebSocketState.Open)
-    {
+        byte[]? initialSnapshot;
+        byte[]? initialAssetManifest;
+        lock (room.Sync)
+        {
+            initialSnapshot = room.LatestSnapshot;
+            initialAssetManifest = room.LatestAssetManifest;
+        }
         if (initialSnapshot != null)
             await socket.SendAsync(new ArraySegment<byte>(initialSnapshot), WebSocketMessageType.Text, true, context.RequestAborted);
         if (initialAssetManifest != null)
@@ -124,24 +128,95 @@ app.Map("/ws", async context =>
             var payload = message.ToArray();
 
             string type = "";
+            string messageLevelId = "";
             try
             {
                 using var json = JsonDocument.Parse(payload);
                 if (json.RootElement.TryGetProperty("type", out var typeElement)) type = typeElement.GetString() ?? "";
+                if (json.RootElement.TryGetProperty("levelId", out var levelElement)) messageLevelId = levelElement.GetString() ?? "";
             }
             catch { }
 
-            bool relay = true;
-            if (type is "snapshot" or "level-switch")
+            if (type == "sync-request")
             {
-                lock (room.Sync) room.LatestSnapshot = payload;
+                if (wantsHost) continue;
+                room.ClientCanPublish[connectionId] = false;
+                byte[]? snapshot;
+                byte[]? manifest;
+                lock (room.Sync)
+                {
+                    snapshot = room.LatestSnapshot;
+                    manifest = room.LatestAssetManifest;
+                }
+
+                Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] sync -> {connectionId:N} room={roomName} snapshot={(snapshot != null)} assets={(manifest != null)}");
+                if (snapshot != null && socket.State == WebSocketState.Open)
+                    await socket.SendAsync(new ArraySegment<byte>(snapshot), WebSocketMessageType.Text, true, context.RequestAborted);
+                if (manifest != null && socket.State == WebSocketState.Open)
+                    await socket.SendAsync(new ArraySegment<byte>(manifest), WebSocketMessageType.Text, true, context.RequestAborted);
+                continue;
+            }
+
+            if (type == "sync-ready")
+            {
+                if (wantsHost) continue;
+                bool matches;
+                lock (room.Sync)
+                    matches = !string.IsNullOrEmpty(room.CurrentLevelId) && string.Equals(messageLevelId, room.CurrentLevelId, StringComparison.Ordinal);
+                room.ClientCanPublish[connectionId] = matches;
+                Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] sync-ready {connectionId:N} room={roomName} level={messageLevelId} accepted={matches}");
+                continue;
+            }
+
+            bool relay = true;
+            if (type == "level-switch")
+            {
+                if (!wantsHost)
+                {
+                    relay = false;
+                    Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] ! blocked client level-switch room={roomName}");
+                }
+                else
+                {
+                    lock (room.Sync)
+                    {
+                        room.CurrentLevelId = messageLevelId;
+                        room.LatestSnapshot = payload;
+                        room.LatestAssetManifest = null;
+                    }
+                }
+            }
+            else if (type == "snapshot")
+            {
+                if (!wantsHost)
+                {
+                    bool canPublish = room.ClientCanPublish.TryGetValue(connectionId, out bool enabled) && enabled;
+                    string currentLevelId;
+                    lock (room.Sync) currentLevelId = room.CurrentLevelId;
+                    if (!canPublish || string.IsNullOrEmpty(currentLevelId) || !string.Equals(messageLevelId, currentLevelId, StringComparison.Ordinal))
+                    {
+                        relay = false;
+                        Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] ! blocked unsafe client snapshot room={roomName} canPublish={canPublish} messageLevel={messageLevelId} currentLevel={currentLevelId}");
+                    }
+                }
+
+                if (relay)
+                {
+                    lock (room.Sync)
+                    {
+                        if (string.IsNullOrEmpty(room.CurrentLevelId)) room.CurrentLevelId = messageLevelId;
+                        room.LatestSnapshot = payload;
+                    }
+                }
             }
             else if (type == "asset-manifest")
             {
-                if (room.HostConnectionId != connectionId)
+                string currentLevelId;
+                lock (room.Sync) currentLevelId = room.CurrentLevelId;
+                if (room.HostConnectionId != connectionId || string.IsNullOrEmpty(currentLevelId) || !string.Equals(messageLevelId, currentLevelId, StringComparison.Ordinal))
                 {
                     relay = false;
-                    Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] ! ignored client asset-manifest room={roomName}");
+                    Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] ! ignored invalid asset-manifest room={roomName} level={messageLevelId} current={currentLevelId}");
                 }
                 else
                 {
@@ -164,6 +239,7 @@ app.Map("/ws", async context =>
     finally
     {
         room.Clients.TryRemove(connectionId, out _);
+        room.ClientCanPublish.TryRemove(connectionId, out _);
         bool hostLeft = room.HostConnectionId == connectionId;
         if (hostLeft && rooms.TryRemove(new KeyValuePair<string, RoomState>(roomName, room)))
         {
@@ -174,8 +250,10 @@ app.Map("/ws", async context =>
                 try { peer.Value.Dispose(); } catch { }
             }
             room.Clients.Clear();
+            room.ClientCanPublish.Clear();
             lock (room.Sync)
             {
+                room.CurrentLevelId = string.Empty;
                 room.LatestSnapshot = null;
                 room.LatestAssetManifest = null;
             }
@@ -204,8 +282,10 @@ static bool IsValidSha256(string value)
 sealed class RoomState
 {
     public ConcurrentDictionary<Guid, WebSocket> Clients { get; } = new();
+    public ConcurrentDictionary<Guid, bool> ClientCanPublish { get; } = new();
     public object Sync { get; } = new();
     public Guid HostConnectionId { get; set; }
+    public string CurrentLevelId { get; set; } = string.Empty;
     public byte[]? LatestSnapshot { get; set; }
     public byte[]? LatestAssetManifest { get; set; }
 }
