@@ -16,9 +16,14 @@ namespace EditorTogether.Patches
     [HarmonyPatch]
     internal static class OperationSyncEditorUpdatePatch
     {
-        private static MethodBase TargetMethod() => AccessTools.Method(typeof(scnEditor), "Update");
+        // Run after all normal Update work (including Unity UI callbacks) has had a chance
+        // to mutate LevelData. Running this from scnEditor.Update could flush the SaveState
+        // pre-edit capture before a button/inspector callback actually changed the chart,
+        // producing a zero-op diff and suppressing the legacy fallback snapshot.
+        private static MethodBase TargetMethod() => AccessTools.Method(typeof(scnEditor), "LateUpdate");
 
         [HarmonyPostfix]
+        [HarmonyPriority(Priority.Last)]
         private static void Postfix(scnEditor __instance)
         {
             OperationSyncManager.Update(__instance);
