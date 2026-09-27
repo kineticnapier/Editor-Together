@@ -99,10 +99,19 @@ namespace EditorTogether
             GUILayout.Space(6f); GUILayout.Label("Status: " + status);
             if (Controller != null)
             {
+                GUILayout.Label(Controller.SyncStatus);
                 GUILayout.Label("Client: " + ShortId(Controller.ClientId));
                 GUILayout.Label("Revision: " + Controller.Revision);
                 GUILayout.Label("Level: " + Controller.LevelId);
                 GUILayout.Label(Controller.AssetStatus);
+
+                if (Controller.IsConnected && !Controller.IsSynchronized)
+                {
+                    Color old = GUI.contentColor;
+                    GUI.contentColor = Color.yellow;
+                    GUILayout.Label("Safety lock: local chart changes will NOT be published until current room state is received.");
+                    GUI.contentColor = old;
+                }
 
                 if (Controller.IsConnected)
                 {
