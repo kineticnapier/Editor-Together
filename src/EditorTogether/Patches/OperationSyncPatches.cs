@@ -9,7 +9,12 @@ namespace EditorTogether.Patches
         [HarmonyPrefix]
         private static void Prefix(scnEditor __instance, bool clearRedo = true, bool dataHasChanged = true)
         {
-            OperationSyncManager.CaptureBeforeMutation(__instance, dataHasChanged);
+            // Some editor paths/mods call SaveState(..., dataHasChanged: false) and then
+            // mutate LevelData anyway. saveStateLastFrame still advances, so the legacy
+            // observer notices the edit, but OperationSync previously skipped its pre-edit
+            // capture and then suppressed that legacy snapshot. Capture every SaveState;
+            // a true no-op simply produces an empty diff at LateUpdate.
+            OperationSyncManager.CaptureBeforeMutation(__instance, true);
         }
     }
 
