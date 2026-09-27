@@ -177,7 +177,7 @@ namespace EditorTogether
             string directory = GetSessionDirectory(levelId);
             Directory.CreateDirectory(directory);
             string path = Path.Combine(directory, "main.adofai");
-            if (!File.Exists(path)) File.WriteAllText(path, encodedLevel ?? string.Empty);
+            File.WriteAllText(path, encodedLevel ?? string.Empty);
             return path;
         }
 
