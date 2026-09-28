@@ -12,7 +12,7 @@ namespace EditorTogether
         internal static CollaborationController Controller;
         internal static bool Enabled { get; private set; } = true;
         private static string serverUrl = "ws://127.0.0.1:38241/ws";
-        private static string room = "default";
+        private static string room = string.Empty;
         private static string displayName = "Player";
         private static bool connecting;
         private static string status = "Disconnected";
@@ -86,11 +86,31 @@ namespace EditorTogether
                 displayName = nextName;
                 Controller?.SetDisplayName(displayName);
             }
+
+            bool canEditConnection = Controller != null && !Controller.IsConnected && !connecting;
+            GUI.enabled = canEditConnection;
             GUILayout.BeginHorizontal(); GUILayout.Label("Server", GUILayout.Width(80f)); serverUrl = GUILayout.TextField(serverUrl, GUILayout.MinWidth(360f)); GUILayout.EndHorizontal();
-            GUILayout.BeginHorizontal(); GUILayout.Label("Room", GUILayout.Width(80f)); room = GUILayout.TextField(room, GUILayout.Width(220f)); GUILayout.EndHorizontal();
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("Room Code", GUILayout.Width(80f));
+            string nextRoom = GUILayout.TextField(room, GUILayout.Width(140f));
+            if (!string.Equals(nextRoom, room, StringComparison.Ordinal)) room = RoomCode.Normalize(nextRoom);
+            if (GUILayout.Button("New Code", GUILayout.Width(90f)))
+            {
+                room = RoomCode.Generate();
+                status = "New room code generated";
+            }
+            GUI.enabled = !string.IsNullOrWhiteSpace(room);
+            if (GUILayout.Button("Copy", GUILayout.Width(70f)))
+            {
+                GUIUtility.systemCopyBuffer = room;
+                status = "Room code copied";
+            }
+            GUILayout.EndHorizontal();
+            GUI.enabled = true;
+
             GUILayout.Space(6f);
             GUILayout.BeginHorizontal();
-            GUI.enabled = Controller != null && !Controller.IsConnected && !connecting;
+            GUI.enabled = canEditConnection;
             if (GUILayout.Button(connecting ? "Connecting..." : "Create Room", GUILayout.Width(130f))) _ = ConnectFromUiAsync(true);
             if (GUILayout.Button(connecting ? "Connecting..." : "Join Room", GUILayout.Width(130f))) _ = ConnectFromUiAsync(false);
             GUI.enabled = Controller != null && Controller.IsConnected && !connecting;
@@ -199,15 +219,30 @@ namespace EditorTogether
         private static async System.Threading.Tasks.Task ConnectFromUiAsync(bool createRoom)
         {
             if (!Enabled || Controller == null || connecting) return;
-            connecting = true; status = createRoom ? "Creating room..." : "Joining room...";
+
+            room = RoomCode.Normalize(room);
+            if (createRoom && string.IsNullOrWhiteSpace(room)) room = RoomCode.Generate();
+            if (string.IsNullOrWhiteSpace(room))
+            {
+                status = "Enter a room code";
+                return;
+            }
+
+            connecting = true; status = createRoom ? "Creating room " + room + "..." : "Joining room " + room + "...";
             try
             {
                 Controller.SetDisplayName(displayName);
                 string url = BuildRoomUrl(serverUrl, room);
                 if (createRoom) await Controller.CreateRoomAsync(url).ConfigureAwait(false); else await Controller.JoinRoomAsync(url).ConfigureAwait(false);
-                status = Controller.IsConnected ? (createRoom ? "Connected (Host)" : "Connected (Joined)") : "Connection failed (see log)";
+                status = Controller.IsConnected
+                    ? (createRoom ? "Connected (Host) - Room " + room : "Connected (Joined) - Room " + room)
+                    : "Connection failed (see log)";
             }
-            catch (Exception ex) { status = "Connection failed"; ModEntry?.Logger.Error("[Collab] UI connect failed: " + ex); }
+            catch (Exception ex)
+            {
+                status = createRoom ? "Create room failed" : "Join room failed";
+                ModEntry?.Logger.Error("[Collab] UI connect failed: " + ex);
+            }
             finally { connecting = false; }
         }
 
@@ -223,7 +258,9 @@ namespace EditorTogether
         private static string BuildRoomUrl(string baseUrl, string roomName)
         {
             string url = (baseUrl ?? string.Empty).Trim(); if (string.IsNullOrEmpty(url)) url = "ws://127.0.0.1:38241/ws";
-            string escapedRoom = Uri.EscapeDataString(string.IsNullOrWhiteSpace(roomName) ? "default" : roomName.Trim());
+            string normalizedRoom = RoomCode.Normalize(roomName);
+            if (string.IsNullOrWhiteSpace(normalizedRoom)) throw new InvalidOperationException("Room code is required.");
+            string escapedRoom = Uri.EscapeDataString(normalizedRoom);
             if (url.IndexOf("room=", StringComparison.OrdinalIgnoreCase) >= 0) return url;
             return url + (url.Contains("?") ? "&" : "?") + "room=" + escapedRoom;
         }
@@ -232,7 +269,12 @@ namespace EditorTogether
         {
             int query = url.IndexOf('?'); if (query < 0) { serverUrl = url; return; }
             serverUrl = url.Substring(0, query); string queryText = url.Substring(query + 1);
-            foreach (string part in queryText.Split('&')) { string[] pair = part.Split(new[] { '=' }, 2); if (pair.Length == 2 && string.Equals(pair[0], "room", StringComparison.OrdinalIgnoreCase)) room = Uri.UnescapeDataString(pair[1]); }
+            foreach (string part in queryText.Split('&'))
+            {
+                string[] pair = part.Split(new[] { '=' }, 2);
+                if (pair.Length == 2 && string.Equals(pair[0], "room", StringComparison.OrdinalIgnoreCase))
+                    room = RoomCode.Normalize(Uri.UnescapeDataString(pair[1]));
+            }
         }
 
         private static bool Unload(UnityModManager.ModEntry modEntry)
