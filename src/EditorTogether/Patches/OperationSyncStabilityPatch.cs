@@ -28,6 +28,7 @@ namespace EditorTogether.Patches
         private static readonly FieldInfo MutationSerialField = AccessTools.Field(typeof(OperationSyncManager), "mutationSerial");
         private static readonly FieldInfo HandledMutationSerialField = AccessTools.Field(typeof(OperationSyncManager), "handledMutationSerial");
         private static readonly FieldInfo DraggingField = AccessTools.Field(typeof(scnEditor), "dragging");
+        private static readonly FieldInfo PointerDownObjectTypeField = AccessTools.Field(typeof(scnEditor), "pointerDownObjectType");
         private static readonly MethodInfo LegacyPublishSnapshotMethod = AccessTools.Method(typeof(CollaborationController), "PublishSnapshot");
 
         private static readonly Type DiffType = typeof(OperationSyncManager).GetNestedType("OperationDiff", BindingFlags.NonPublic);
@@ -213,17 +214,22 @@ namespace EditorTogether.Patches
 
         private static bool IsInteractionActive(scnEditor editor)
         {
+            if (editor == null) return false;
+
             try
             {
-                if (Input.GetMouseButton(0) || Input.GetMouseButton(1) || Input.GetMouseButton(2)) return true;
+                if (DraggingField != null && (bool)DraggingField.GetValue(editor)) return true;
             }
             catch { }
 
             try
             {
-                return DraggingField != null && editor != null && (bool)DraggingField.GetValue(editor);
+                object pointerType = PointerDownObjectTypeField?.GetValue(editor);
+                if (pointerType != null && !string.Equals(pointerType.ToString(), "None", StringComparison.Ordinal)) return true;
             }
-            catch { return false; }
+            catch { }
+
+            return false;
         }
 
         private static void DiscardNoOpCapture(int serial)
