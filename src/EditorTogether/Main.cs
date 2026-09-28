@@ -240,7 +240,7 @@ namespace EditorTogether
             }
             catch (Exception ex)
             {
-                status = createRoom ? "Create room failed" : "Join room failed";
+                status = ConnectionError.Describe(ex, createRoom, room);
                 ModEntry?.Logger.Error("[Collab] UI connect failed: " + ex);
             }
             finally { connecting = false; }
