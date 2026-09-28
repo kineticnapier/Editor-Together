@@ -1,6 +1,5 @@
 using System;
 using System.Collections;
-using System.Globalization;
 using System.Reflection;
 using HarmonyLib;
 using UnityEngine;
@@ -14,8 +13,8 @@ namespace EditorTogether.Patches
     /// while position changes continue in later DragDecorations calls.
     ///
     /// Keep the captured pre-edit state alive until LevelData has actually changed and
-    /// then remained unchanged for one full editor frame. This prevents a zero-op flush
-    /// at drag start and coalesces continuous inspector/drag edits into one operation diff.
+    /// the stock editor interaction that owns the change has finished. A final idle frame
+    /// is required before the operation diff is flushed.
     /// </summary>
     [HarmonyPatch]
     internal static class OperationSyncStabilityPatch
@@ -31,6 +30,13 @@ namespace EditorTogether.Patches
         private static readonly FieldInfo PointerDownObjectTypeField = AccessTools.Field(typeof(scnEditor), "pointerDownObjectType");
         private static readonly MethodInfo LegacyPublishSnapshotMethod = AccessTools.Method(typeof(CollaborationController), "PublishSnapshot");
 
+        // Avoid a compile-time dependency on UnityEngine.InputLegacyModule. ADOFAI itself
+        // uses UnityEngine.Input, so resolve it only at runtime when available.
+        private static readonly Type InputType = AccessTools.TypeByName("UnityEngine.Input");
+        private static readonly MethodInfo GetMouseButtonMethod = InputType == null
+            ? null
+            : AccessTools.Method(InputType, "GetMouseButton", new[] { typeof(int) });
+
         private static readonly Type DiffType = typeof(OperationSyncManager).GetNestedType("OperationDiff", BindingFlags.NonPublic);
         private static readonly Type DiffResultType = typeof(OperationSyncManager).GetNestedType("OperationDiffResult", BindingFlags.NonPublic);
         private static readonly MethodInfo DiffBuildMethod = DiffType?.GetMethod("Build", BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic);
@@ -41,7 +47,6 @@ namespace EditorTogether.Patches
         private static scnEditor trackedEditor;
         private static int trackedMutationSerial = -1;
         private static bool changeObserved;
-        private static string lastFingerprint = string.Empty;
         private static int stableFrames;
         private static float noChangeElapsed;
         private static bool loggedInspectionFailure;
@@ -76,9 +81,18 @@ namespace EditorTogether.Patches
                 trackedEditor = editor;
                 trackedMutationSerial = serial;
                 changeObserved = false;
-                lastFingerprint = string.Empty;
                 stableFrames = 0;
                 noChangeElapsed = 0f;
+            }
+
+            // Stock mouse drags create their SaveStateScope at pointer-down and mutate
+            // LevelData later. Do not diff or serialize the chart while that interaction is
+            // still active; wait for mouse-up / editor input completion instead.
+            if (IsInteractionActive(editor))
+            {
+                stableFrames = 0;
+                noChangeElapsed = 0f;
+                return false;
             }
 
             if (!changeObserved)
@@ -98,37 +112,24 @@ namespace EditorTogether.Patches
 
                 if (!changed)
                 {
-                    if (IsInteractionActive(editor))
+                    noChangeElapsed += Math.Max(0f, Time.unscaledDeltaTime);
+                    if (noChangeElapsed >= NoChangeCleanupSeconds)
                     {
-                        noChangeElapsed = 0f;
-                    }
-                    else
-                    {
-                        noChangeElapsed += Math.Max(0f, Time.unscaledDeltaTime);
-                        if (noChangeElapsed >= NoChangeCleanupSeconds)
-                        {
-                            DiscardNoOpCapture(serial);
-                            ResetTracking();
-                        }
+                        DiscardNoOpCapture(serial);
+                        ResetTracking();
                     }
                     return false;
                 }
 
                 changeObserved = true;
+                stableFrames = 0;
                 noChangeElapsed = 0f;
-                lastFingerprint = FingerprintCurrentLevel(editor);
-                stableFrames = 0;
                 return false;
             }
 
-            string fingerprint = FingerprintCurrentLevel(editor);
-            if (!string.Equals(fingerprint, lastFingerprint, StringComparison.Ordinal))
-            {
-                lastFingerprint = fingerprint;
-                stableFrames = 0;
-                return false;
-            }
-
+            // If another SaveStateScope begins, mutationSerial changes and the tracker is
+            // reset above. One completely idle frame therefore means both the editor input
+            // and the SaveState transaction stream have gone quiet.
             stableFrames++;
             if (stableFrames < RequiredStableFrames) return false;
 
@@ -194,27 +195,25 @@ namespace EditorTogether.Patches
             }
         }
 
-        private static string FingerprintCurrentLevel(scnEditor editor)
-        {
-            string encoded = editor?.levelData?.Encode() ?? string.Empty;
-            unchecked
-            {
-                ulong hash = 14695981039346656037UL;
-                for (int i = 0; i < encoded.Length; i++)
-                {
-                    char c = encoded[i];
-                    hash ^= (byte)c;
-                    hash *= 1099511628211UL;
-                    hash ^= (byte)(c >> 8);
-                    hash *= 1099511628211UL;
-                }
-                return encoded.Length.ToString(CultureInfo.InvariantCulture) + ":" + hash.ToString("X16", CultureInfo.InvariantCulture);
-            }
-        }
-
         private static bool IsInteractionActive(scnEditor editor)
         {
             if (editor == null) return false;
+
+            try
+            {
+                if (editor.userIsEditingAnInputField) return true;
+            }
+            catch { }
+
+            try
+            {
+                if (GetMouseButtonMethod != null)
+                {
+                    for (int button = 0; button <= 2; button++)
+                        if ((bool)GetMouseButtonMethod.Invoke(null, new object[] { button })) return true;
+                }
+            }
+            catch { }
 
             try
             {
@@ -265,7 +264,6 @@ namespace EditorTogether.Patches
             trackedEditor = null;
             trackedMutationSerial = -1;
             changeObserved = false;
-            lastFingerprint = string.Empty;
             stableFrames = 0;
             noChangeElapsed = 0f;
         }
