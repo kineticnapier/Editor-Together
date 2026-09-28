@@ -67,7 +67,7 @@ namespace EditorTogether.Patches
 
             var lastFloors = LastPresenceFloorsField?.GetValue(__instance) as List<int>;
             if (lastFloors == null) return true; // Compatibility fallback to stock sender.
-            PresenceState state = States.GetOrCreateValue(__instance);
+            PresenceState state = States.GetValue(__instance, _ => new PresenceState());
 
             float elapsed = 0f;
             try { elapsed = PresenceHeartbeatElapsedField == null ? 0f : (float)PresenceHeartbeatElapsedField.GetValue(__instance); }
