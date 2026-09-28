@@ -103,11 +103,15 @@ namespace EditorTogether
             return SendEnvelopeAsync(envelope);
         }
 
-        public Task SendPresenceAsync(string levelId, string displayName, bool isHost, bool leaving, IReadOnlyList<int> selectedFloors)
+        public Task SendPresenceAsync(string levelId, string displayName, bool isHost, bool leaving, IReadOnlyList<int> selectedFloors, IReadOnlyList<int> selectedDecorations = null)
         {
             var floors = new List<object>();
             if (selectedFloors != null)
                 for (int i = 0; i < selectedFloors.Count; i++) floors.Add(selectedFloors[i]);
+
+            var decorations = new List<object>();
+            if (selectedDecorations != null)
+                for (int i = 0; i < selectedDecorations.Count; i++) decorations.Add(selectedDecorations[i]);
 
             var envelope = new Dictionary<string, object>
             {
@@ -117,7 +121,8 @@ namespace EditorTogether
                 ["isHost"] = isHost,
                 ["leaving"] = leaving,
                 ["levelId"] = levelId ?? string.Empty,
-                ["selectedFloors"] = floors
+                ["selectedFloors"] = floors,
+                ["selectedDecorations"] = decorations
             };
             return SendEnvelopeAsync(envelope);
         }
@@ -242,15 +247,9 @@ namespace EditorTogether
                             string displayName = json.TryGetValue("displayName", out object nameObj) ? Convert.ToString(nameObj) : string.Empty;
                             bool isHost = json.TryGetValue("isHost", out object hostObj) && Convert.ToBoolean(hostObj);
                             bool leaving = json.TryGetValue("leaving", out object leavingObj) && Convert.ToBoolean(leavingObj);
-                            var floors = new List<int>();
-                            if (json.TryGetValue("selectedFloors", out object floorsObj) && floorsObj is IList list)
-                            {
-                                for (int i = 0; i < list.Count; i++)
-                                {
-                                    try { floors.Add(Convert.ToInt32(list[i])); } catch { }
-                                }
-                            }
-                            incomingPresence.Enqueue(new PresenceMessage(clientId, displayName, isHost, leaving, levelId, floors.ToArray()));
+                            var floors = ReadIntArray(json, "selectedFloors");
+                            var decorations = ReadIntArray(json, "selectedDecorations");
+                            incomingPresence.Enqueue(new PresenceMessage(clientId, displayName, isHost, leaving, levelId, floors, decorations));
                             continue;
                         }
 
@@ -283,6 +282,19 @@ namespace EditorTogether
             }
             catch (OperationCanceledException) { }
             catch (Exception ex) { logger.Error($"[Collab] receive loop failed: {ex}"); }
+        }
+
+        private static int[] ReadIntArray(Dictionary<string, object> json, string key)
+        {
+            var values = new List<int>();
+            if (json != null && json.TryGetValue(key, out object raw) && raw is IList list)
+            {
+                for (int i = 0; i < list.Count; i++)
+                {
+                    try { values.Add(Convert.ToInt32(list[i])); } catch { }
+                }
+            }
+            return values.ToArray();
         }
 
         private void CleanupSocket()
@@ -329,7 +341,8 @@ namespace EditorTogether
         public bool IsLeaving { get; }
         public string LevelId { get; }
         public int[] SelectedFloors { get; }
-        public PresenceMessage(string clientId, string displayName, bool isHost, bool isLeaving, string levelId, int[] selectedFloors)
+        public int[] SelectedDecorations { get; }
+        public PresenceMessage(string clientId, string displayName, bool isHost, bool isLeaving, string levelId, int[] selectedFloors, int[] selectedDecorations = null)
         {
             ClientId = clientId;
             DisplayName = displayName ?? string.Empty;
@@ -337,6 +350,7 @@ namespace EditorTogether
             IsLeaving = isLeaving;
             LevelId = levelId;
             SelectedFloors = selectedFloors ?? Array.Empty<int>();
+            SelectedDecorations = selectedDecorations ?? Array.Empty<int>();
         }
     }
 }
