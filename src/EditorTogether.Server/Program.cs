@@ -11,6 +11,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = MaxAssetBytes);
 var app = builder.Build();
 var rooms = new ConcurrentDictionary<string, RoomState>();
+var sendGates = new ConcurrentDictionary<WebSocket, SemaphoreSlim>();
 var assetRoot = Environment.GetEnvironmentVariable("EDITOR_TOGETHER_ASSET_CACHE");
 if (string.IsNullOrWhiteSpace(assetRoot)) assetRoot = Path.Combine(AppContext.BaseDirectory, "asset-cache");
 Directory.CreateDirectory(assetRoot);
@@ -428,6 +429,7 @@ app.Map("/ws", async context =>
             try { await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None); } catch { }
         }
         socket.Dispose();
+        sendGates.TryRemove(socket, out _);
         Console.WriteLine($"[{DateTimeOffset.Now:HH:mm:ss}] - {connectionId:N} room={roomName} clients={room.Clients.Count}");
     }
 });
@@ -436,10 +438,22 @@ app.Run("http://0.0.0.0:38241");
 
 string AssetPath(string hash) => Path.Combine(assetRoot!, hash.ToLowerInvariant());
 
-static Task SendBytesAsync(WebSocket socket, byte[] payload, CancellationToken token)
-    => socket.SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Text, true, token);
+async Task SendBytesAsync(WebSocket socket, byte[] payload, CancellationToken token)
+{
+    SemaphoreSlim gate = sendGates.GetOrAdd(socket, _ => new SemaphoreSlim(1, 1));
+    await gate.WaitAsync(token);
+    try
+    {
+        if (socket.State != WebSocketState.Open) return;
+        await socket.SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Text, true, token);
+    }
+    finally
+    {
+        gate.Release();
+    }
+}
 
-static async Task BroadcastAsync(RoomState room, Guid sourceConnectionId, byte[] payload, CancellationToken token)
+async Task BroadcastAsync(RoomState room, Guid sourceConnectionId, byte[] payload, CancellationToken token)
 {
     foreach (var peer in room.Clients.ToArray())
     {
