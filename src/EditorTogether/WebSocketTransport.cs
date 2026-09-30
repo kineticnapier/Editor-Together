@@ -1,0 +1,356 @@
+using System;
+using System.Collections;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.IO;
+using System.Net.WebSockets;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using UnityModManagerNet;
+
+namespace EditorTogether
+{
+    internal sealed partial class WebSocketTransport : IDisposable
+    {
+        private static WebSocketTransport debugInstance;
+
+        private readonly UnityModManager.ModEntry.ModLogger logger;
+        private readonly SemaphoreSlim sendGate = new SemaphoreSlim(1, 1);
+        private ClientWebSocket socket;
+        private CancellationTokenSource cancellation;
+        private Uri connectedUri;
+        private readonly ConcurrentQueue<SnapshotMessage> incoming = new ConcurrentQueue<SnapshotMessage>();
+        private readonly ConcurrentQueue<PresenceMessage> incomingPresence = new ConcurrentQueue<PresenceMessage>();
+        private readonly ConcurrentQueue<AssetManifestMessage> incomingAssetManifests = new ConcurrentQueue<AssetManifestMessage>();
+        public string ClientId { get; } = Guid.NewGuid().ToString("N");
+        public bool IsConnected => socket != null && socket.State == WebSocketState.Open;
+
+        public Uri HttpBaseUri
+        {
+            get
+            {
+                Uri value = connectedUri;
+                if (value == null) return null;
+                var builder = new UriBuilder(value)
+                {
+                    Scheme = string.Equals(value.Scheme, "wss", StringComparison.OrdinalIgnoreCase) ? "https" : "http",
+                    Path = "/",
+                    Query = string.Empty,
+                    Fragment = string.Empty
+                };
+                return builder.Uri;
+            }
+        }
+
+        public WebSocketTransport(UnityModManager.ModEntry.ModLogger logger)
+        {
+            this.logger = logger;
+            debugInstance = this;
+        }
+
+        internal static bool DebugAbortCurrent()
+        {
+            WebSocketTransport instance = debugInstance;
+            if (instance == null) return false;
+
+            ClientWebSocket current = instance.socket;
+            if (current == null || current.State != WebSocketState.Open) return false;
+
+            instance.logger.Warning("[CollabDebug] simulating abrupt network drop");
+            try
+            {
+                current.Abort();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                instance.logger.Error("[CollabDebug] network-drop injection failed: " + ex);
+                return false;
+            }
+        }
+
+        public async Task ConnectAsync(string url)
+        {
+            if (IsConnected) return;
+            CleanupSocket();
+            string protocolUrl = AddProtocolQuery(url);
+            connectedUri = new Uri(protocolUrl);
+            socket = new ClientWebSocket();
+            cancellation = new CancellationTokenSource();
+            await socket.ConnectAsync(connectedUri, cancellation.Token).ConfigureAwait(false);
+            logger.Log($"[Collab] connected to {protocolUrl} as {ClientId}");
+            _ = Task.Run(ReceiveLoopAsync);
+        }
+
+        private static string AddProtocolQuery(string url)
+        {
+            string value = url ?? string.Empty;
+            if (value.IndexOf("protocol=", StringComparison.OrdinalIgnoreCase) >= 0) return value;
+            return value + (value.Contains("?") ? "&" : "?") + "protocol=" + OperationSyncManager.ProtocolVersion;
+        }
+
+        public Task SendSnapshotAsync(long revision, string levelId, string levelData, bool levelSwitch)
+        {
+            var envelope = new Dictionary<string, object>
+            {
+                ["type"] = levelSwitch ? "level-switch" : "snapshot",
+                ["clientId"] = ClientId,
+                ["levelId"] = levelId ?? string.Empty,
+                ["revision"] = revision,
+                ["levelData"] = levelData
+            };
+            return SendEnvelopeAsync(envelope);
+        }
+
+        public Task SendPresenceAsync(string levelId, string displayName, bool isHost, bool leaving, IReadOnlyList<int> selectedFloors, IReadOnlyList<int> selectedDecorations = null)
+        {
+            var floors = new List<object>();
+            if (selectedFloors != null)
+                for (int i = 0; i < selectedFloors.Count; i++) floors.Add(selectedFloors[i]);
+
+            var decorations = new List<object>();
+            if (selectedDecorations != null)
+                for (int i = 0; i < selectedDecorations.Count; i++) decorations.Add(selectedDecorations[i]);
+
+            var envelope = new Dictionary<string, object>
+            {
+                ["type"] = "presence",
+                ["clientId"] = ClientId,
+                ["displayName"] = displayName ?? string.Empty,
+                ["isHost"] = isHost,
+                ["leaving"] = leaving,
+                ["levelId"] = levelId ?? string.Empty,
+                ["selectedFloors"] = floors,
+                ["selectedDecorations"] = decorations
+            };
+            return SendEnvelopeAsync(envelope);
+        }
+
+        public Task SendAssetManifestAsync(string levelId, IReadOnlyList<AssetDescriptor> assets)
+        {
+            var entries = new List<object>();
+            if (assets != null)
+            {
+                for (int i = 0; i < assets.Count; i++)
+                {
+                    AssetDescriptor asset = assets[i];
+                    if (asset == null) continue;
+                    entries.Add(new Dictionary<string, object>
+                    {
+                        ["path"] = asset.Path,
+                        ["hash"] = asset.Hash,
+                        ["size"] = asset.Size
+                    });
+                }
+            }
+
+            var envelope = new Dictionary<string, object>
+            {
+                ["type"] = "asset-manifest",
+                ["clientId"] = ClientId,
+                ["levelId"] = levelId ?? string.Empty,
+                ["assets"] = entries
+            };
+            return SendEnvelopeAsync(envelope);
+        }
+
+        public Task SendSyncRequestAsync()
+        {
+            var envelope = new Dictionary<string, object>
+            {
+                ["type"] = "sync-request",
+                ["clientId"] = ClientId
+            };
+            return SendEnvelopeAsync(envelope);
+        }
+
+        public Task SendSyncReadyAsync(string levelId, long revision)
+        {
+            var envelope = new Dictionary<string, object>
+            {
+                ["type"] = "sync-ready",
+                ["clientId"] = ClientId,
+                ["levelId"] = levelId ?? string.Empty,
+                ["revision"] = revision
+            };
+            return SendEnvelopeAsync(envelope);
+        }
+
+        private async Task SendEnvelopeAsync(Dictionary<string, object> envelope)
+        {
+            var current = socket;
+            var currentCancellation = cancellation;
+            if (current == null || currentCancellation == null || current.State != WebSocketState.Open) return;
+
+            envelope["protocolVersion"] = OperationSyncManager.ProtocolVersion;
+            byte[] bytes = Encoding.UTF8.GetBytes(RuntimeJson.Serialize(envelope));
+            await sendGate.WaitAsync(currentCancellation.Token).ConfigureAwait(false);
+            try
+            {
+                if (!ReferenceEquals(current, socket) || current.State != WebSocketState.Open) return;
+                await current.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, currentCancellation.Token).ConfigureAwait(false);
+            }
+            finally { sendGate.Release(); }
+        }
+
+        public bool TryDequeue(out SnapshotMessage message) => incoming.TryDequeue(out message);
+        public bool TryDequeuePresence(out PresenceMessage message) => incomingPresence.TryDequeue(out message);
+        public bool TryDequeueAssetManifest(out AssetManifestMessage message) => incomingAssetManifests.TryDequeue(out message);
+
+        public async Task DisconnectAsync(string reason = "Disconnected")
+        {
+            var current = socket;
+            if (current == null) return;
+            try
+            {
+                if (current.State == WebSocketState.Open || current.State == WebSocketState.CloseReceived)
+                    await current.CloseAsync(WebSocketCloseStatus.NormalClosure, reason, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch { }
+            try { cancellation?.Cancel(); } catch { }
+        }
+
+        private async Task ReceiveLoopAsync()
+        {
+            var currentSocket = socket;
+            var token = cancellation.Token;
+            byte[] buffer = new byte[64 * 1024];
+            try
+            {
+                while (!token.IsCancellationRequested && currentSocket.State == WebSocketState.Open)
+                {
+                    using (var stream = new MemoryStream())
+                    {
+                        WebSocketReceiveResult result;
+                        do
+                        {
+                            result = await currentSocket.ReceiveAsync(new ArraySegment<byte>(buffer), token).ConfigureAwait(false);
+                            if (result.MessageType == WebSocketMessageType.Close)
+                            {
+                                try { await currentSocket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "ack", CancellationToken.None).ConfigureAwait(false); } catch { }
+                                return;
+                            }
+                            stream.Write(buffer, 0, result.Count);
+                        } while (!result.EndOfMessage);
+
+                        string jsonText = Encoding.UTF8.GetString(stream.ToArray());
+                        var json = RuntimeJson.Deserialize(jsonText) as Dictionary<string, object>;
+                        if (json == null || !json.TryGetValue("type", out object typeObj)) continue;
+                        string type = Convert.ToString(typeObj);
+                        string clientId = json.TryGetValue("clientId", out object clientObj) ? Convert.ToString(clientObj) : string.Empty;
+                        if (clientId == ClientId) continue;
+                        string levelId = json.TryGetValue("levelId", out object levelIdObj) ? Convert.ToString(levelIdObj) : string.Empty;
+
+                        if (type == "presence")
+                        {
+                            string displayName = json.TryGetValue("displayName", out object nameObj) ? Convert.ToString(nameObj) : string.Empty;
+                            bool isHost = json.TryGetValue("isHost", out object hostObj) && Convert.ToBoolean(hostObj);
+                            bool leaving = json.TryGetValue("leaving", out object leavingObj) && Convert.ToBoolean(leavingObj);
+                            var floors = ReadIntArray(json, "selectedFloors");
+                            var decorations = ReadIntArray(json, "selectedDecorations");
+                            incomingPresence.Enqueue(new PresenceMessage(clientId, displayName, isHost, leaving, levelId, floors, decorations));
+                            continue;
+                        }
+
+                        if (type == "asset-manifest")
+                        {
+                            var assets = new List<AssetDescriptor>();
+                            if (json.TryGetValue("assets", out object assetsObj) && assetsObj is IList list)
+                            {
+                                for (int i = 0; i < list.Count; i++)
+                                {
+                                    if (!(list[i] is Dictionary<string, object> entry)) continue;
+                                    string path = entry.TryGetValue("path", out object pathObj) ? Convert.ToString(pathObj) : string.Empty;
+                                    string hash = entry.TryGetValue("hash", out object hashObj) ? Convert.ToString(hashObj) : string.Empty;
+                                    long size = entry.TryGetValue("size", out object sizeObj) ? Convert.ToInt64(sizeObj) : 0L;
+                                    assets.Add(new AssetDescriptor(path, hash, size));
+                                }
+                            }
+                            incomingAssetManifests.Enqueue(new AssetManifestMessage(clientId, levelId, assets.ToArray()));
+                            continue;
+                        }
+
+                        if (TryHandleOperationEnvelope(json, type, clientId, levelId)) continue;
+
+                        if (type != "snapshot" && type != "level-switch") continue;
+                        long revision = json.TryGetValue("revision", out object revisionObj) ? Convert.ToInt64(revisionObj) : 0;
+                        string levelData = json.TryGetValue("levelData", out object levelObj) ? Convert.ToString(levelObj) : string.Empty;
+                        incoming.Enqueue(new SnapshotMessage(clientId, levelId, revision, levelData, type == "level-switch"));
+                    }
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex) { logger.Error($"[Collab] receive loop failed: {ex}"); }
+        }
+
+        private static int[] ReadIntArray(Dictionary<string, object> json, string key)
+        {
+            var values = new List<int>();
+            if (json != null && json.TryGetValue(key, out object raw) && raw is IList list)
+            {
+                for (int i = 0; i < list.Count; i++)
+                {
+                    try { values.Add(Convert.ToInt32(list[i])); } catch { }
+                }
+            }
+            return values.ToArray();
+        }
+
+        private void CleanupSocket()
+        {
+            try { cancellation?.Cancel(); } catch { }
+            try { socket?.Dispose(); } catch { }
+            try { cancellation?.Dispose(); } catch { }
+            socket = null;
+            cancellation = null;
+            connectedUri = null;
+            while (incoming.TryDequeue(out _)) { }
+            while (incomingPresence.TryDequeue(out _)) { }
+            while (incomingAssetManifests.TryDequeue(out _)) { }
+            ClearOperationQueues();
+        }
+
+        public void Dispose()
+        {
+            if (ReferenceEquals(debugInstance, this)) debugInstance = null;
+            try { DisconnectAsync("Mod unloaded").Wait(500); } catch { }
+            CleanupSocket();
+            sendGate.Dispose();
+        }
+    }
+
+    internal sealed class SnapshotMessage
+    {
+        public string ClientId { get; }
+        public string LevelId { get; }
+        public long Revision { get; }
+        public string LevelData { get; }
+        public bool IsLevelSwitch { get; }
+        public SnapshotMessage(string clientId, string levelId, long revision, string levelData, bool isLevelSwitch)
+        {
+            ClientId = clientId; LevelId = levelId; Revision = revision; LevelData = levelData; IsLevelSwitch = isLevelSwitch;
+        }
+    }
+
+    internal sealed class PresenceMessage
+    {
+        public string ClientId { get; }
+        public string DisplayName { get; }
+        public bool IsHost { get; }
+        public bool IsLeaving { get; }
+        public string LevelId { get; }
+        public int[] SelectedFloors { get; }
+        public int[] SelectedDecorations { get; }
+        public PresenceMessage(string clientId, string displayName, bool isHost, bool isLeaving, string levelId, int[] selectedFloors, int[] selectedDecorations = null)
+        {
+            ClientId = clientId;
+            DisplayName = displayName ?? string.Empty;
+            IsHost = isHost;
+            IsLeaving = isLeaving;
+            LevelId = levelId;
+            SelectedFloors = selectedFloors ?? Array.Empty<int>();
+            SelectedDecorations = selectedDecorations ?? Array.Empty<int>();
+        }
+    }
+}
